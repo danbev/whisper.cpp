@@ -16,6 +16,13 @@ on:
         description: 'Pre-release tag name'
         required: false
         type: string
+      run_type:
+        description: 'Workflow type to run'
+        required: true
+        type: choice
+        options:
+          - full-ci
+          - release-only
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -71,6 +78,7 @@ jobs:
           echo "name=$TAG_NAME" >> $GITHUB_OUTPUT
 
   ubuntu-22:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -97,6 +105,7 @@ jobs:
             cmake --build build --config Release -j $(nproc)'
 
   ubuntu-22-arm64:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -123,6 +132,7 @@ jobs:
             cmake --build build --config Release -j $(nproc)'
 
   ubuntu-22-arm-v7:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -149,6 +159,7 @@ jobs:
             cmake --build build --config Release -j $(nproc)'
 
   macOS-latest:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: macOS-latest
 
     strategy:
@@ -208,6 +219,7 @@ jobs:
 #            cmake --build build --config Release
 
   ubuntu-22-gcc:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -236,6 +248,7 @@ jobs:
             ctest -L gh --output-on-failure'
 
   ubuntu-22-gcc-arm64:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -264,6 +277,7 @@ jobs:
             ctest -L gh --output-on-failure'
 
   ubuntu-22-gcc-arm-v7:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -292,6 +306,7 @@ jobs:
             ctest -L gh --output-on-failure'
 
   ubuntu-22-clang:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -323,6 +338,7 @@ jobs:
             ctest -L gh --output-on-failure'
 
   ubuntu-22-gcc-sanitized:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -351,6 +367,7 @@ jobs:
             ctest -L gh --output-on-failure'
 
   ubuntu-22-cmake-sycl:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -401,6 +418,7 @@ jobs:
           cmake --build . --config Release -j $(nproc)
 
   ubuntu-22-cmake-sycl-fp16:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -451,6 +469,7 @@ jobs:
           cmake --build . --config Release -j $(nproc)
 
   windows-msys2:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: windows-latest
 
     strategy:
@@ -495,6 +514,7 @@ jobs:
             cmake --build build --config ${{ matrix.build }} -j $(nproc)
 
   windows:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: windows-latest
 
     strategy:
@@ -555,6 +575,7 @@ jobs:
           path: build/bin/${{ matrix.build }}
 
   windows-blas:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: windows-latest
 
     strategy:
@@ -628,6 +649,7 @@ jobs:
           path: build/bin/${{ matrix.build }}
 
   windows-cublas:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: windows-2019
     strategy:
       matrix:
@@ -696,6 +718,7 @@ jobs:
           path: build/bin/${{ matrix.build }}
 
   emscripten:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     strategy:
@@ -776,6 +799,7 @@ jobs:
           name: llama-${{ needs.determine-tag.outputs.tag_name }}-xcframework
 
   android:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -875,6 +899,7 @@ jobs:
 #          PGP_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
   quantize:
+    if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -889,7 +914,7 @@ jobs:
           ./build/bin/quantize models/ggml-tiny.en.bin models/ggml-tiny.en-q4_0.bin q4_0
 
   release:
-    if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+    if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' || github.event.inputs.custom_tag != '' }}
 
     runs-on: ubuntu-latest
 
