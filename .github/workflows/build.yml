@@ -12,7 +12,7 @@ on:
         description: 'Create new release'
         required: true
         type: boolean
-      custom_tag:
+      pre_release_tag:
         description: 'Pre-release tag name'
         required: false
         type: string
@@ -53,7 +53,7 @@ jobs:
         run: |
           BUILD_NUMBER=$(git rev-list --count HEAD)
           SHORT_HASH=$(git rev-parse --short=7 HEAD)
-          CUSTOM_TAG="${{ github.event.inputs.custom_tag }}"
+          CUSTOM_TAG="${{ github.event.inputs.pre_release_tag }}"
 
           echo "Raw values:"
           echo "BUILD_NUMBER: $BUILD_NUMBER"
@@ -193,11 +193,6 @@ jobs:
             -DWHISPER_BUILD_SERVER=OFF \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
-
-      - name: xcodebuild for swift package
-        id: xcodebuild
-        run: |
-          ./build-xcframework.sh
 
 
 #  freeBSD-latest:
@@ -787,16 +782,20 @@ jobs:
 
       - name: Pack artifacts
         id: pack_artifacts
-        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' || github.event.inputs.custom_tag != '' }}
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+                github.event.inputs.create_release == 'true' ||
+                github.event.inputs.pre_release_tag != '' }}
         run: |
-          zip --symlinks -r llama-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip build-apple/llama.xcframework
+          zip --symlinks -r whisper-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip build-apple/whisper.xcframework
 
       - name: Upload artifacts
-        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' || github.event.inputs.custom_tag != '' }}
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+                github.event.inputs.create_release == 'true' ||
+                github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
-          path: llama-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip
-          name: llama-${{ needs.determine-tag.outputs.tag_name }}-xcframework
+          path: whisper-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip
+          name: whisper-${{ needs.determine-tag.outputs.tag_name }}-xcframework
 
   android:
     if: ${{ github.event_name == 'push' || github.event.inputs.run_type == 'full-ci' }}
@@ -914,7 +913,9 @@ jobs:
           ./build/bin/quantize models/ggml-tiny.en.bin models/ggml-tiny.en-q4_0.bin q4_0
 
   release:
-    if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' || github.event.inputs.custom_tag != '' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+            github.event.inputs.create_release == 'true' ||
+            github.event.inputs.pre_release_tag != '' }}
 
     runs-on: ubuntu-latest
 
@@ -953,7 +954,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.determine-tag.outputs.tag_name }}
-          prerelease: ${{ github.event.inputs.custom_tag != '' }}
+          prerelease: ${{ github.event.inputs.pre_release_tag != '' }}
 
       - name: Upload release
         id: upload_release
