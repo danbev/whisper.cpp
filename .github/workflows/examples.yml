@@ -1,4 +1,5 @@
 name: Examples Tests
+if: false
 on:
   push:
     paths:

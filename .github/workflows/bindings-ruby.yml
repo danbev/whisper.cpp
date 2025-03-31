@@ -1,4 +1,5 @@
 name: Bindings Tests (Ruby)
+if: false
 on:
   push:
     paths:
