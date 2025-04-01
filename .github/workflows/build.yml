@@ -1122,6 +1122,9 @@ jobs:
             }
 
   coreml-base-en:
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+            github.event.inputs.create_release == 'true' ||
+            github.event.inputs.pre_release_tag != '' }}
     runs-on: macos-latest
     needs: determine-tag
 
@@ -1135,23 +1138,17 @@ jobs:
 
       - name: Generate CoreML model
         run: |
-          python3 -m venv venv
+          python3.11 -m venv venv
           source venv/bin/activate
           pip install ane_transformers openai-whisper coremltools
           ./models/generate-coreml-model.sh base.en
 
       - name: Pack CoreML model
         id: pack_artifacts
-        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
-                github.event.inputs.create_release == 'true' ||
-                github.event.inputs.pre_release_tag != '' }}
         run: |
           zip --symlinks -r whisper-${{ needs.determine-tag.outputs.tag_name }}-ggml-base.en-encoder.mlmodelc.zip models/ggml-base.en-encoder.mlmodelc
 
       - name: Upload artifacts
-        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
-                github.event.inputs.create_release == 'true' ||
-                github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
           path: whisper-${{ needs.determine-tag.outputs.tag_name }}-ggml-base.en-encoder.mlmodelc.zip
