@@ -2,6 +2,36 @@ import Foundation
 import SwiftUI
 import AVFoundation
 
+func getMemoryUsage() -> UInt64 {
+    var info = mach_task_basic_info()
+    var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+
+    let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+        }
+    }
+
+    if kerr == KERN_SUCCESS {
+        return info.resident_size
+    } else {
+        return 0
+    }
+}
+
+func formatMemoryUsage(_ bytes: UInt64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.allowedUnits = [.useAll]
+    formatter.countStyle = .memory
+    return formatter.string(fromByteCount: Int64(bytes))
+}
+
+func printMemoryUsage(label: String = "") {
+    let memoryUsage = getMemoryUsage()
+    let formattedMemory = formatMemoryUsage(memoryUsage)
+    print("\(label)Memory usage: \(formattedMemory)")
+}
+
 @MainActor
 class WhisperState: NSObject, ObservableObject, AVAudioRecorderDelegate {
     @Published var isModelLoaded = false
@@ -104,9 +134,14 @@ class WhisperState: NSObject, ObservableObject, AVAudioRecorderDelegate {
             messageLog += "Reading wave samples...\n"
             let data = try readAudioSamples(url)
             messageLog += "Transcribing data...\n"
-            await whisperContext.fullTranscribe(samples: data)
-            let text = await whisperContext.getTranscription()
-            messageLog += "Done: \(text)\n"
+            for i in 0..<150 {
+                printMemoryUsage(label: "[\(i)] before whisper_full_transcribe ")
+                await whisperContext.fullTranscribe(samples: data)
+                let text = await whisperContext.getTranscription()
+                messageLog += "Done: \(text)\n"
+                printMemoryUsage(label: "[\(i)] after whisper_full_transcribe ")
+
+            }
         } catch {
             print(error.localizedDescription)
             messageLog += "\(error.localizedDescription)\n"
