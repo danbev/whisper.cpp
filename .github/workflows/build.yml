@@ -675,8 +675,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=${{ matrix.build }}
           -DGGML_BLAS=${{ matrix.blas }}
           -DGGML_BLAS_VENDOR=OpenBLAS
-          -DBLAS_LIBRARIES="OpenBLAS-${{matrix.blasver}}/lib/libopenblas.lib"
-          -DBLAS_INCLUDE_DIRS="OpenBLAS-${{matrix.blasver}}/include"
+          -DOpenBLAS_DIR="OpenBLAS-${{matrix.blasver}}/lib/cmake/openblas"
           -DWHISPER_SDL2=${{ matrix.sdl2 }}
 
       - name: Build
@@ -686,7 +685,7 @@ jobs:
 
       - name: Copy openblas.dll
         if: matrix.blas == 'ON'
-        run: copy "C:/vcpkg/packages/openblas_${{ matrix.s2arc }}-windows/bin/openblas.dll" build/bin/${{ matrix.build }}
+        run: copy "OpenBLAS-${{matrix.blasver}}/bin/libopenblas.dll" build/bin/${{ matrix.build }}
 
       - name: Copy SDL2.dll
         if: matrix.sdl2 == 'ON'
