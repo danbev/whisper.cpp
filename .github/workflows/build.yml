@@ -686,7 +686,7 @@ jobs:
 
       - name: Copy openblas.dll
         if: matrix.blas == 'ON'
-        run: copy "C:/vcpkg/packages/openblas_${{ matrix.s2arc }}-windows/bin/openblas.dll" build/bin/${{ matrix.build }}
+        run: copy "OpenBLAS-${{matrix.blasver}}/bin/libopenblas.dll" build/bin/${{ matrix.build }}
 
       - name: Copy SDL2.dll
         if: matrix.sdl2 == 'ON'
