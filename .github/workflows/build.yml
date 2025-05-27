@@ -610,7 +610,7 @@ jobs:
                 github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: whisper-bin-${{ matrix.arch }}
+          name: whisper-bin-${{ matrix.arch }}.zip
           path: "build/bin*/${{ matrix.build }}"
 
   windows-blas:
@@ -693,7 +693,7 @@ jobs:
                 github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: whisper-blas-bin-${{ matrix.arch }}
+          name: whisper-blas-bin-${{ matrix.arch }}.zip
           path: "build/bin*/${{ matrix.build }}"
 
   windows-cublas:
@@ -890,7 +890,7 @@ jobs:
                 github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: whisper-cublas-${{ matrix.cuda-toolkit }}-bin-${{ matrix.arch }}
+          name: whisper-cublas-${{ matrix.cuda-toolkit }}-bin-${{ matrix.arch }}.zip
           path: "build/bin*/${{ matrix.build }}"
 
   emscripten:
