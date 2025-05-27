@@ -610,8 +610,8 @@ jobs:
                 github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: whisper-bin-${{ matrix.arch }}.zip
-          path: "build/bin/${{ matrix.build }}"
+          name: whisper-bin-${{ matrix.arch }}
+          path: "build/bin*/${{ matrix.build }}"
 
   windows-blas:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
@@ -693,8 +693,8 @@ jobs:
                 github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: whisper-blas-bin-${{ matrix.arch }}.zip
-          path: "build/bin/${{ matrix.build }}"
+          name: whisper-blas-bin-${{ matrix.arch }}
+          path: "build/bin*/${{ matrix.build }}"
 
   windows-cublas:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
@@ -890,8 +890,8 @@ jobs:
                 github.event.inputs.pre_release_tag != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: whisper-cublas-${{ matrix.cuda-toolkit }}-bin-${{ matrix.arch }}.zip
-          path: "build/bin/${{ matrix.build }}"
+          name: whisper-cublas-${{ matrix.cuda-toolkit }}-bin-${{ matrix.arch }}
+          path: "build/bin*/${{ matrix.build }}"
 
   emscripten:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
