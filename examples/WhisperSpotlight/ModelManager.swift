@@ -20,6 +20,7 @@ struct ModelManager {
 
     private func downloadModel(to path: URL, progress: ((Double) -> Void)?) async throws {
         let request = URLRequest(url: url)
+        print("Downloading model from \(url)...", terminator: "\n")
         for _ in 0..<3 {
             do {
                 let (temp, response) = try await URLSession.shared.download(for: request, delegate: ProgressDelegate(progress))
@@ -28,6 +29,7 @@ struct ModelManager {
                 let attr = try fileManager.attributesOfItem(atPath: path.path)
                 if let size = attr[.size] as? NSNumber, size.intValue > 1_400_000_000 { return }
             } catch {
+                print(error)
                 try? fileManager.removeItem(at: path)
                 continue
             }

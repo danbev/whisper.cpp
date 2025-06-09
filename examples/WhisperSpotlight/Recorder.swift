@@ -6,6 +6,8 @@ actor Recorder {
     private(set) var currentFile: URL?
 
     func startRecording(toOutputFile url: URL, delegate: AVAudioRecorderDelegate?) throws {
+        print("startRecording() called...")
+
         currentFile = url
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
@@ -17,6 +19,8 @@ actor Recorder {
         rec.delegate = delegate
         guard rec.record() else { throw NSError(domain: "rec", code: 1) }
         recorder = rec
+        print("startRecording() done...")
+
     }
 
     func stopRecording() {

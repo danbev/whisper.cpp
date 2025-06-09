@@ -22,4 +22,5 @@ class GlobalHotkey {
     }
 }
 
-let optionKey: UInt32 = UInt32(cmdKey) >> 8
+let optionKeyModifier: UInt32 = UInt32(optionKey)
+//let optionKey: UInt32 = UInt32(cmdKey) >> 8

@@ -36,34 +36,62 @@ struct OverlayView: View {
     }
 
     private func toggleListening() {
+        print("toggleListening called, current state: \(state)")
+
         switch state {
-        case .idle: state = .listening
-        case .listening: stopRecording()
-        default: break
+        case .idle:
+            state = .listening
+            print("State changed to listening")
+        case .listening:
+            print("Stopping recording")
+
+            stopRecording()
+        default:
+            print("State is: \(state)")
+
+            break
         }
     }
 
     private func startRecording() {
+        print("startRecording() called")
+
         task = Task {
             do {
                 try await manager.ensureModel()
                 let file = try FileManager.default
                     .temporaryDirectory.appending(path: "record.wav")
                 try await recorder.startRecording(toOutputFile: file, delegate: nil)
-            } catch {}
+            } catch {
+                print("ERROR in startRecording: \(error)")
+                            // Also update the UI to show the error
+                            DispatchQueue.main.async {
+                                self.state = .done("Error: \(error.localizedDescription)")
+                            }
+            }
         }
     }
 
     private func stopRecording() {
+        print("stopRecording() called")
+
         task?.cancel()
         Task {
+            print("Stopping recorder...")
+
             recorder.stopRecording()
             if let url = recorder.currentFile {
                 state = .transcribing("Transcribing…")
-                let ctx = try? WhisperContext.createContext(path: manager.modelPath().path())
+                let ctx = try? WhisperContext.createContext(path: manager.modelPath().path)
+                print("Whisper context created: \(ctx != nil)")
+
                 if let data = try? decodeWaveFile(url) {
+                    print("Audio data decoded, samples: \(data.count)")
+
                     ctx?.fullTranscribe(samples: data, language: "")
                     let text = ctx?.getTranscription() ?? ""
+                    print("Transcription result: '\(text)'")
+
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                     state = .done(text)
