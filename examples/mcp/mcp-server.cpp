@@ -470,7 +470,7 @@ public:
             return false;
         }
 
-        printf("Successfully loaded %s\n", fname_inp.c_str());
+        fprintf(stderr, "Successfully loaded %s\n", fname_inp.c_str());
         return true;
     }
 
@@ -644,14 +644,14 @@ public:
 
     // Main message processing loop
     void run() {
-        printf("Persistent Whisper.cpp MCP Server starting...\n");
-        printf("Model path: %s\n", model_path.c_str());
+        fprintf(stderr, "Persistent Whisper.cpp MCP Server starting...\n");
+        fprintf(stderr, "Model path: %s\n", model_path.c_str());
 
         std::string line;
         while (std::getline(std::cin, line)) {
             if (line.empty()) continue;
 
-            printf("Received: %s\n", line.c_str());
+            fprintf(stderr, "Received: %s\n", line.c_str());
 
             try {
                 json request = json::parse(line);
@@ -689,6 +689,7 @@ public:
 
 int main(int argc, char ** argv) {
     ggml_backend_load_all();
+    fprintf(stderr, "Whisper MCP Server starting...\n");
 
     whisper_params wparams;
     mcp_params     mparams;
