@@ -69,7 +69,7 @@ public:
         cleanup();
     }
     
-    bool start_server(const std::string& server_command) {
+    bool start_server(const std::string & server_command) {
         // Create pipes for communication
         if (pipe(stdin_pipe) == -1 || pipe(stdout_pipe) == -1 || pipe(stderr_pipe) == -1) {
             std::cerr << "Failed to create pipes" << std::endl;
@@ -142,7 +142,7 @@ public:
         return true;
     }
 
-    json send_request(const json& request) {
+    json send_request(const json & request) {
         if (!server_running) {
             throw std::runtime_error("Server is not running");
         }
@@ -252,7 +252,7 @@ public:
         return send_request(request);
     }
     
-    json call_tool(const std::string& tool_name, const json& arguments) {
+    json call_tool(const std::string & tool_name, const json & arguments) {
         json request = {
             {"jsonrpc", "2.0"},
             {"id", next_request_id()},
@@ -267,17 +267,17 @@ public:
     }
 };
 
-void print_separator(const std::string& title) {
+void print_separator(const std::string & title) {
     std::cout << "\n" << std::string(50, '=') << std::endl;
     std::cout << title << std::endl;
     std::cout << std::string(50, '=') << std::endl;
 }
 
-void pretty_print_json(const json& j) {
+void pretty_print_json(const json & j) {
     std::cout << j.dump(2) << std::endl;
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char ** argv) {
     std::string server_command = "build/bin/whisper-mcp-server";
     
     if (argc > 1) {
@@ -335,7 +335,7 @@ int main(int argc, char* argv[]) {
         
         print_separator("DEMO COMPLETED SUCCESSFULLY");
         
-    } catch (const std::exception& e) {
+    } catch (const std::exception & e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
