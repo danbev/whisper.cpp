@@ -22,9 +22,9 @@ enum class MCPError : int {
 };
 
 Handler::Handler(Transport * transport,
-                  const struct mcp_params & mparams,
-                  const struct whisper_params & wparams,
-                   const std::string & model_path)
+                 const struct mcp_params & mparams,
+                 const struct whisper_params & wparams,
+                 const std::string & model_path)
     : transport(transport), ctx(nullptr), model_path(model_path), model_loaded(false)
     ,mparams(mparams), wparams(wparams) {
     if (!transport) {

@@ -32,8 +32,8 @@ private:
 
     bool load_model();
     std::string transcribe_file(const std::string & filepath, 
-                               const std::string & language = "auto", 
-                               bool translate = false);
+                                const std::string & language = "auto",
+                                bool translate = false);
     bool load_audio_file(const std::string & fname_inp, std::vector<float> & pcmf32);
 
     json create_transcribe_result(const json & arguments);
