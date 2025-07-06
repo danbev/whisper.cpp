@@ -37,10 +37,10 @@ private:
     json create_transcribe_result(const json & arguments);
     json create_model_info_result();
 
-    MCPTransport * transport;
+    bool                     model_loaded;
+    MCPTransport           * transport;
     struct whisper_context * ctx;
-    std::string model_path;
-    bool model_loaded;
-    struct mcp_params mparams;
-    struct whisper_params wparams;
+    std::string              model_path;
+    struct                   mcp_params mparams;
+    struct                   whisper_params wparams;
 };
