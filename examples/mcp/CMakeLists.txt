@@ -1,5 +1,5 @@
 set(TARGET whisper-mcp-server)
-add_executable(${TARGET} mcp-server.cpp stdio-transport.cpp whisper-mcp-handler.cpp)
+add_executable(${TARGET} mcp-server.cpp stdio-transport.cpp mcp-handler.cpp)
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 set(CLIENT_TARGET mcp_client)

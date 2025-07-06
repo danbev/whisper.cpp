@@ -1,5 +1,5 @@
 #include "stdio-transport.hpp"
-#include "whisper-mcp-handler.hpp"
+#include "mcp-handler.hpp"
 
 #include "common.h"
 #include "common-whisper.h"
@@ -150,8 +150,8 @@ int main(int argc, char ** argv) {
     }
 
     try {
-        StdioTransport transport;
-        WhisperMCPHandler handler(&transport, mparams, wparams, wparams.model);
+        mcp::StdioTransport transport;
+        mcp::Handler handler(&transport, mparams, wparams, wparams.model);
 
         fprintf(stderr, "MCP Server ready, listening on stdin...\n");
         transport.run(&handler);

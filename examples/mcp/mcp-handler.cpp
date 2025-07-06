@@ -1,8 +1,10 @@
-#include "whisper-mcp-handler.hpp"
+#include "mcp-handler.hpp"
 #include "common.h"
 #include "common-whisper.h"
 #include <cstdio>
 #include <stdexcept>
+
+namespace mcp {
 
 // JSON-RPC 2.0 error codes
 enum class MCPError : int {
@@ -19,10 +21,10 @@ enum class MCPError : int {
     TRANSCRIPTION_FAILED = 1003
 };
 
-WhisperMCPHandler::WhisperMCPHandler(MCPTransport * transport,
-                                   const struct mcp_params & mparams,
-                                   const struct whisper_params & wparams,
-                                   const std::string & model_path)
+Handler::Handler(Transport * transport,
+                  const struct mcp_params & mparams,
+                  const struct whisper_params & wparams,
+                   const std::string & model_path)
     : transport(transport), ctx(nullptr), model_path(model_path), model_loaded(false)
     ,mparams(mparams), wparams(wparams) {
     if (!transport) {
@@ -30,13 +32,13 @@ WhisperMCPHandler::WhisperMCPHandler(MCPTransport * transport,
     }
 }
 
-WhisperMCPHandler::~WhisperMCPHandler() {
+Handler::~Handler() {
     if (ctx) {
         whisper_free(ctx);
     }
 }
 
-bool WhisperMCPHandler::handle_message(const json & request) {
+bool Handler::handle_message(const json & request) {
     // Validate JSON-RPC 2.0 format
     if (!request.contains("jsonrpc") || request["jsonrpc"] != "2.0") {
         fprintf(stderr, "Invalid JSON-RPC format\n");
@@ -83,7 +85,7 @@ bool WhisperMCPHandler::handle_message(const json & request) {
     }
 }
 
-void WhisperMCPHandler::handle_initialize(const json & id, const json & params) {
+void Handler::handle_initialize(const json & id, const json & params) {
     fprintf(stderr, "Initializing whisper server with model: %s\n", model_path.c_str());
     
     if (!load_model()) {
@@ -106,7 +108,7 @@ void WhisperMCPHandler::handle_initialize(const json & id, const json & params) 
     send_result(id, result);
 }
 
-void WhisperMCPHandler::handle_list_tools(const json & id) {
+void Handler::handle_list_tools(const json & id) {
     fprintf(stderr, "Listing available tools\n");
     
     json result = {
@@ -149,7 +151,7 @@ void WhisperMCPHandler::handle_list_tools(const json & id) {
     send_result(id, result);
 }
 
-void WhisperMCPHandler::handle_tool_call(const json & id, const json & params) {
+void Handler::handle_tool_call(const json & id, const json & params) {
     if (!params.contains("name")) {
         send_error(id, static_cast<int>(MCPError::INVALID_PARAMS), "Missing required parameter: name");
         return;
@@ -172,11 +174,11 @@ void WhisperMCPHandler::handle_tool_call(const json & id, const json & params) {
     }
 }
 
-void WhisperMCPHandler::handle_notification_initialized() {
+void Handler::handle_notification_initialized() {
     fprintf(stderr, "Client initialization completed\n");
 }
 
-void WhisperMCPHandler::send_result(const json & id, const json & result) {
+void Handler::send_result(const json & id, const json & result) {
     json response = {
         {"jsonrpc", "2.0"},
         {"result", result}
@@ -189,7 +191,7 @@ void WhisperMCPHandler::send_result(const json & id, const json & result) {
     transport->send_response(response);
 }
 
-void WhisperMCPHandler::send_error(const json & id, int code, const std::string & message) {
+void Handler::send_error(const json & id, int code, const std::string & message) {
     json response = {
         {"jsonrpc", "2.0"},
         {"id", id},
@@ -202,7 +204,7 @@ void WhisperMCPHandler::send_error(const json & id, int code, const std::string 
     transport->send_response(response);
 }
 
-bool WhisperMCPHandler::load_model() {
+bool Handler::load_model() {
     if (model_loaded) {
         return true;
     }
@@ -222,9 +224,9 @@ bool WhisperMCPHandler::load_model() {
     return true;
 }
 
-std::string WhisperMCPHandler::transcribe_file(const std::string & filepath, 
-                                              const std::string & language, 
-                                              bool translate) {
+std::string Handler::transcribe_file(const std::string & filepath, 
+                                     const std::string & language, 
+                                     bool translate) {
     if (!model_loaded) {
         throw std::runtime_error("Model not loaded");
     }
@@ -264,7 +266,7 @@ std::string WhisperMCPHandler::transcribe_file(const std::string & filepath,
     return result;
 }
 
-bool WhisperMCPHandler::load_audio_file(const std::string & fname_inp, std::vector<float> & pcmf32) {
+bool Handler::load_audio_file(const std::string & fname_inp, std::vector<float> & pcmf32) {
     fprintf(stderr, "Loading audio file: %s\n", fname_inp.c_str());
     std::vector<std::vector<float>> pcmf32s;
 
@@ -277,7 +279,7 @@ bool WhisperMCPHandler::load_audio_file(const std::string & fname_inp, std::vect
     return true;
 }
 
-json WhisperMCPHandler::create_transcribe_result(const json & arguments) {
+json Handler::create_transcribe_result(const json & arguments) {
     try {
         if (!arguments.contains("file")) {
             throw std::runtime_error("Missing required parameter: file");
@@ -303,7 +305,7 @@ json WhisperMCPHandler::create_transcribe_result(const json & arguments) {
     }
 }
 
-json WhisperMCPHandler::create_model_info_result() {
+json Handler::create_model_info_result() {
     if (!model_loaded) {
         throw std::runtime_error("No model loaded");
     }
@@ -326,3 +328,5 @@ json WhisperMCPHandler::create_model_info_result() {
         })}
     };
 }
+
+} // namespace mcp

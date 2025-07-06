@@ -1,15 +1,18 @@
 #include "stdio-transport.hpp"
-#include "whisper-mcp-handler.hpp"
+#include "mcp-handler.hpp"
+
 #include <iostream>
 #include <string>
 #include <cstdio>
+
+namespace mcp {
 
 void StdioTransport::send_response(const json & response) {
     std::cout << response.dump() << std::endl;
     std::cout.flush();
 }
 
-void StdioTransport::run(WhisperMCPHandler * handler) {
+void StdioTransport::run(Handler * handler) {
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line.empty()) {
@@ -28,3 +31,5 @@ void StdioTransport::run(WhisperMCPHandler * handler) {
         }
     }
 }
+
+} // namespace mcp

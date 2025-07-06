@@ -4,8 +4,12 @@
 
 using json = nlohmann::ordered_json;
 
-class MCPTransport {
+namespace mcp {
+
+class Transport {
 public:
-    virtual ~MCPTransport() = default;
+    virtual ~Transport() = default;
     virtual void send_response(const json & response) = 0;
 };
+
+} // namespace mcp

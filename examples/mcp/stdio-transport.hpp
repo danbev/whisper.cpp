@@ -2,14 +2,18 @@
 
 #include "mcp-transport.hpp"
 
-class WhisperMCPHandler;
+namespace mcp {
 
-class StdioTransport : public MCPTransport {
+class Handler;
+
+class StdioTransport : public Transport {
 public:
     StdioTransport() = default;
     ~StdioTransport() = default;
 
     void send_response(const json & response) override;
-    
-    void run(WhisperMCPHandler * handler);
+
+    void run(Handler * handler);
 };
+
+} // namespace mcp
