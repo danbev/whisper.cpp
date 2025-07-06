@@ -23,16 +23,16 @@ WhisperMCPHandler::WhisperMCPHandler(MCPTransport * transport,
                                    const struct mcp_params & mparams,
                                    const struct whisper_params & wparams,
                                    const std::string & model_path)
-    : transport_(transport), ctx_(nullptr), model_path_(model_path), model_loaded_(false)
-    ,mparams_(mparams), wparams_(wparams) {
-    if (!transport_) {
+    : transport(transport), ctx(nullptr), model_path(model_path), model_loaded(false)
+    ,mparams(mparams), wparams(wparams) {
+    if (!transport) {
         throw std::invalid_argument("Transport cannot be null");
     }
 }
 
 WhisperMCPHandler::~WhisperMCPHandler() {
-    if (ctx_) {
-        whisper_free(ctx_);
+    if (ctx) {
+        whisper_free(ctx);
     }
 }
 
@@ -84,7 +84,7 @@ bool WhisperMCPHandler::handle_message(const json & request) {
 }
 
 void WhisperMCPHandler::handle_initialize(const json & id, const json & params) {
-    fprintf(stderr, "Initializing whisper server with model: %s\n", model_path_.c_str());
+    fprintf(stderr, "Initializing whisper server with model: %s\n", model_path.c_str());
     
     if (!load_model()) {
         send_error(id, static_cast<int>(MCPError::INTERNAL_ERROR), "Failed to load whisper model");
@@ -186,7 +186,7 @@ void WhisperMCPHandler::send_result(const json & id, const json & result) {
         response["id"] = id;
     }
     
-    transport_->send_response(response);
+    transport->send_response(response);
 }
 
 void WhisperMCPHandler::send_error(const json & id, int code, const std::string & message) {
@@ -199,25 +199,25 @@ void WhisperMCPHandler::send_error(const json & id, int code, const std::string 
         }}
     };
     
-    transport_->send_response(response);
+    transport->send_response(response);
 }
 
 bool WhisperMCPHandler::load_model() {
-    if (model_loaded_) {
+    if (model_loaded) {
         return true;
     }
 
-    fprintf(stderr, "Loading whisper model from: %s\n", model_path_.c_str());
+    fprintf(stderr, "Loading whisper model from: %s\n", model_path.c_str());
 
     whisper_context_params cparams = whisper_context_default_params();
-    ctx_ = whisper_init_from_file_with_params(model_path_.c_str(), cparams);
+    ctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
     
-    if (!ctx_) {
-        fprintf(stderr, "Failed to load model: %s\n", model_path_.c_str());
+    if (!ctx) {
+        fprintf(stderr, "Failed to load model: %s\n", model_path.c_str());
         return false;
     }
 
-    model_loaded_ = true;
+    model_loaded = true;
     fprintf(stderr, "Model loaded successfully!\n");
     return true;
 }
@@ -225,7 +225,7 @@ bool WhisperMCPHandler::load_model() {
 std::string WhisperMCPHandler::transcribe_file(const std::string & filepath, 
                                               const std::string & language, 
                                               bool translate) {
-    if (!model_loaded_) {
+    if (!model_loaded) {
         throw std::runtime_error("Model not loaded");
     }
 
@@ -250,14 +250,14 @@ std::string WhisperMCPHandler::transcribe_file(const std::string & filepath,
         throw std::runtime_error("Failed to load audio file: " + filepath);
     }
 
-    if (whisper_full(ctx_, wparams, pcmf32.data(), pcmf32.size()) != 0) {
+    if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
         throw std::runtime_error("Whisper inference failed");
     }
 
     std::string result;
-    const int n_segments = whisper_full_n_segments(ctx_);
+    const int n_segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < n_segments; ++i) {
-        const char* text = whisper_full_get_segment_text(ctx_, i);
+        const char * text = whisper_full_get_segment_text(ctx, i);
         result += text;
     }
 
@@ -268,7 +268,7 @@ bool WhisperMCPHandler::load_audio_file(const std::string & fname_inp, std::vect
     fprintf(stderr, "Loading audio file: %s\n", fname_inp.c_str());
     std::vector<std::vector<float>> pcmf32s;
 
-    if (!::read_audio_data(fname_inp, pcmf32, pcmf32s, wparams_.diarize)) {
+    if (!::read_audio_data(fname_inp, pcmf32, pcmf32s, wparams.diarize)) {
         fprintf(stderr, "Failed to read audio file: %s\n", fname_inp.c_str());
         return false;
     }
@@ -304,17 +304,17 @@ json WhisperMCPHandler::create_transcribe_result(const json & arguments) {
 }
 
 json WhisperMCPHandler::create_model_info_result() {
-    if (!model_loaded_) {
+    if (!model_loaded) {
         throw std::runtime_error("No model loaded");
     }
 
     json model_info = {
-        {"model_path", model_path_},
-        {"model_loaded", model_loaded_},
-        {"vocab_size", whisper_n_vocab(ctx_)},
-        {"n_text_ctx", whisper_n_text_ctx(ctx_)},
-        {"n_audio_ctx", whisper_n_audio_ctx(ctx_)},
-        {"is_multilingual", whisper_is_multilingual(ctx_)}
+        {"model_path", model_path},
+        {"model_loaded", model_loaded},
+        {"vocab_size", whisper_n_vocab(ctx)},
+        {"n_text_ctx", whisper_n_text_ctx(ctx)},
+        {"n_audio_ctx", whisper_n_audio_ctx(ctx)},
+        {"is_multilingual", whisper_is_multilingual(ctx)}
     };
 
     return json{

@@ -15,7 +15,6 @@ public:
                               const std::string & model_path);
     ~WhisperMCPHandler();
 
-    // Process incoming MCP message
     bool handle_message(const json & request);
 
 private:
@@ -38,10 +37,10 @@ private:
     json create_transcribe_result(const json & arguments);
     json create_model_info_result();
 
-    MCPTransport * transport_;
-    struct whisper_context * ctx_;
-    std::string model_path_;
-    bool model_loaded_;
-    struct mcp_params mparams_;
-    struct whisper_params wparams_;
+    MCPTransport * transport;
+    struct whisper_context * ctx;
+    std::string model_path;
+    bool model_loaded;
+    struct mcp_params mparams;
+    struct whisper_params wparams;
 };
