@@ -2,6 +2,7 @@
 
 #include "json.hpp"
 #include <string>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -25,7 +26,7 @@ public:
     Client();
     ~Client();
 
-    bool start_server(const std::string & server_command);
+    bool start_server(const std::string & server_command, const std::vector<std::string> & args = {});
     void stop_server();
     bool is_server_running() const {
         return server_running_;

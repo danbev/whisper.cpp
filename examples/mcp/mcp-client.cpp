@@ -11,7 +11,7 @@
 
 namespace mcp {
 
-Client::Client() 
+Client::Client()
     : server_pid_(-1), server_stdin_(nullptr), server_stdout_(nullptr), server_stderr_(nullptr)
     ,request_id_counter_(0) , server_running_(false) {
     stdin_pipe_[0] = stdin_pipe_[1] = -1;
@@ -40,7 +40,7 @@ void Client::cleanup() {
     if (server_running_ && server_pid_ > 0) {
         kill(server_pid_, SIGTERM);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
+
         int status;
         if (waitpid(server_pid_, &status, WNOHANG) == 0) {
             kill(server_pid_, SIGKILL);
@@ -50,7 +50,7 @@ void Client::cleanup() {
     }
 }
 
-bool Client::start_server(const std::string & server_command) {
+bool Client::start_server(const std::string& server_command, const std::vector<std::string>& args) {
     if (server_running_) {
         return false; // Already running
     }
@@ -76,7 +76,16 @@ bool Client::start_server(const std::string & server_command) {
         close(stdout_pipe_[0]); close(stdout_pipe_[1]);
         close(stderr_pipe_[0]); close(stderr_pipe_[1]);
 
-        execl("/bin/sh", "sh", "-c", server_command.c_str(), nullptr);
+        // Prepare arguments for execvp
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>(server_command.c_str()));
+        
+        for (const auto& arg : args) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+
+        execvp(server_command.c_str(), argv.data());
         exit(1); // exec failed
     }
 
@@ -108,7 +117,7 @@ json Client::send_request(const json & request) {
     }
 
     std::string request_str = request.dump() + "\n";
-    
+
     if (fputs(request_str.c_str(), server_stdin_) == EOF) {
         throw std::runtime_error("Failed to send request to server");
     }
@@ -204,25 +213,25 @@ int Client::next_request_id() {
 
 bool Client::wait_for_server_ready(int timeout_ms) {
     auto start = std::chrono::steady_clock::now();
-    
+
     while (std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count() < timeout_ms) {
-        
+
         if (server_running_) {
             // Give server a moment to fully start up
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             return true;
         }
-        
+
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    
+
     return false;
 }
 
 std::string Client::get_last_server_logs() {
     std::stringstream logs;
-    
+
     int flags = fcntl(fileno(server_stderr_), F_GETFL, 0);
     fcntl(fileno(server_stderr_), F_SETFL, flags | O_NONBLOCK);
 

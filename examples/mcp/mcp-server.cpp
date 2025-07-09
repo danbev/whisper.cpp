@@ -129,7 +129,6 @@ void check_ffmpeg_availibility() {
 
 int main(int argc, char ** argv) {
     ggml_backend_load_all();
-    fprintf(stderr, "Whisper MCP Server starting...\n");
 
     whisper_params wparams;
     mcp_params     mparams;
@@ -144,6 +143,8 @@ int main(int argc, char ** argv) {
         whisper_print_usage(argc, argv, wparams, mparams);
         exit(0);
     }
+
+    fprintf(stderr, "Whisper MCP Server starting...\n");
 
     if (mparams.ffmpeg_converter) {
         check_ffmpeg_availibility();
