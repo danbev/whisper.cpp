@@ -9,33 +9,26 @@ void pretty_print_json(const json & j) {
     printf("%s\n", j.dump(2).c_str());
 }
 
-void assert_initialized_response(const json & init_response) {
-    assert(init_response.contains("id"));
-    assert(init_response["id"] == 1);
+template<typename T>
+void assert_json_equals(const json & j, const std::string & key, const T & expected) {
+    assert(j.contains(key));
+    assert(j.at(key) == expected);
+}
 
-    assert(init_response.contains("jsonrpc"));
-    assert(init_response["jsonrpc"] == "2.0");
+void assert_initialized(const json & response) {
+    assert_json_equals(response, "id", 1);
+    assert_json_equals(response, "jsonrpc", "2.0");
 
-    assert(init_response.contains("result"));
+    json result = response.at("result");
 
-    // Check the result object
-    json result = init_response["result"];
+    json cap = result.at("capabilities");
+    assert(cap.at("tools").is_object());
 
-    // Check capabilities
-    assert(result.contains("capabilities"));
-    assert(result["capabilities"].contains("tools"));
-    assert(result["capabilities"]["tools"].is_object());
+    assert_json_equals(result, "protocolVersion", "2024-11-05");
 
-    // Check protocol version
-    assert(result.contains("protocolVersion"));
-    assert(result["protocolVersion"] == "2024-11-05");
-
-    // Check server info
-    assert(result.contains("serverInfo"));
-    assert(result["serverInfo"].contains("name"));
-    assert(result["serverInfo"]["name"] == "whisper-mcp-server");
-    assert(result["serverInfo"].contains("version"));
-    assert(result["serverInfo"]["version"] == "1.0.0");
+    json server_info = result.at("serverInfo");
+    assert_json_equals(server_info, "name", "whisper-mcp-server");
+    assert_json_equals(server_info, "version", "1.0.0");
 }
 
 int main() {
@@ -46,14 +39,14 @@ int main() {
     mcp::Client client;
 
     assert(client.start_server(server_bin, args));
-
+    assert(client.is_server_running());
     assert(client.wait_for_server_ready(2000));
 
-    client.read_server_logs();
 
-    json init_response = client.initialize("mcp-demo-client", "1.0.0");
-    pretty_print_json(init_response);
-    assert_initialized_response(init_response);
+    assert_initialized(client.initialize("mcp-test-client", "1.0.0"));
+
+    client.send_initialized();
+    client.read_server_logs();
 
     return 0;
 }
