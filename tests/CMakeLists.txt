@@ -106,7 +106,7 @@ set_tests_properties(${VAD_TARGET} PROPERTIES LABELS "base;en")
 
 # MCP Handler test
 set(MCP_HANDLER_TEST test-mcp-handler)
-add_executable(${MCP_HANDLER_TEST} ${MCP_HANDLER_TEST}.cpp ../examples/mcp/mcp-client.cpp)
+add_executable(${MCP_HANDLER_TEST} ${MCP_HANDLER_TEST}.cpp ../examples/mcp/stdio-client.cpp)
 target_include_directories(${MCP_HANDLER_TEST} PRIVATE ../include ../ggml/include ../examples ../examples/mcp)
 target_link_libraries(${MCP_HANDLER_TEST} PRIVATE common)
 add_test(NAME ${MCP_HANDLER_TEST} COMMAND ${MCP_HANDLER_TEST})

@@ -8,7 +8,7 @@ using json = nlohmann::json;
 
 namespace mcp {
 
-class Client {
+class StdioClient {
 private:
     pid_t server_pid_;
     int   stdin_pipe_[2];   
@@ -23,8 +23,8 @@ private:
     void cleanup();
 
 public:
-    Client();
-    ~Client();
+    StdioClient();
+    ~StdioClient();
 
     bool start_server(const std::string & server_command, const std::vector<std::string> & args = {});
     void stop_server();

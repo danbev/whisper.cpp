@@ -1,4 +1,4 @@
-#include "mcp-client.hpp"
+#include "stdio-client.hpp"
 
 #include <string>
 #include <iostream>
@@ -10,11 +10,11 @@ void print_separator(const std::string & title) {
     std::cout << std::string(50, '=') << std::endl;
 }
 
-void pretty_print_json(const json& j) {
+void pretty_print_json(const json & j) {
     std::cout << j.dump(2) << std::endl;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char ** argv) {
     std::string server_command = "build/bin/whisper-mcp-server";
 
     if (argc > 1) {
@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
     std::cout << "Server command: " << server_command << std::endl;
 
     try {
-        mcp::Client client;
+        mcp::StdioClient client;
 
         // Start the server
         print_separator("STARTING SERVER");
@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
 
         print_separator("DEMO COMPLETED SUCCESSFULLY");
 
-    } catch (const std::exception& e) {
+    } catch (const std::exception & e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }

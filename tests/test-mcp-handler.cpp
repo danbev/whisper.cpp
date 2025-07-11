@@ -1,4 +1,4 @@
-#include "mcp-client.hpp"
+#include "stdio-client.hpp"
 
 #include "whisper.h"
 #include "common-whisper.h"
@@ -36,7 +36,7 @@ int main() {
     std::vector<std::string> args = {
         "--model", "../../models/ggml-base.en.bin"
     };
-    mcp::Client client;
+    mcp::StdioClient client;
 
     assert(client.start_server(server_bin, args));
     assert(client.is_server_running());

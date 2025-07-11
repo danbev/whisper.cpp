@@ -1,4 +1,4 @@
-#include "mcp-client.hpp"
+#include "stdio-client.hpp"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -11,7 +11,7 @@
 
 namespace mcp {
 
-Client::Client()
+StdioClient::StdioClient()
     : server_pid_(-1), server_stdin_(nullptr), server_stdout_(nullptr), server_stderr_(nullptr)
     ,request_id_counter_(0) , server_running_(false) {
     stdin_pipe_[0] = stdin_pipe_[1] = -1;
@@ -19,11 +19,11 @@ Client::Client()
     stderr_pipe_[0] = stderr_pipe_[1] = -1;
 }
 
-Client::~Client() {
+StdioClient::~StdioClient() {
     cleanup();
 }
 
-void Client::cleanup() {
+void StdioClient::cleanup() {
     if (server_stdin_) {
         fclose(server_stdin_);
         server_stdin_ = nullptr;
@@ -50,7 +50,7 @@ void Client::cleanup() {
     }
 }
 
-bool Client::start_server(const std::string& server_command, const std::vector<std::string>& args) {
+bool StdioClient::start_server(const std::string& server_command, const std::vector<std::string>& args) {
     if (server_running_) {
         return false; // Already running
     }
@@ -107,11 +107,11 @@ bool Client::start_server(const std::string& server_command, const std::vector<s
     return true;
 }
 
-void Client::stop_server() {
+void StdioClient::stop_server() {
     cleanup();
 }
 
-json Client::send_request(const json & request) {
+json StdioClient::send_request(const json & request) {
     if (!server_running_) {
         throw std::runtime_error("Server is not running");
     }
@@ -142,7 +142,7 @@ json Client::send_request(const json & request) {
     return json::parse(response_str);
 }
 
-void Client::read_server_logs() {
+void StdioClient::read_server_logs() {
     int flags = fcntl(fileno(server_stderr_), F_GETFL, 0);
     fcntl(fileno(server_stderr_), F_SETFL, flags | O_NONBLOCK);
 
@@ -154,7 +154,7 @@ void Client::read_server_logs() {
     fcntl(fileno(server_stderr_), F_SETFL, flags);
 }
 
-json Client::initialize(const std::string & client_name, const std::string & client_version) {
+json StdioClient::initialize(const std::string & client_name, const std::string & client_version) {
     json request = {
         {"jsonrpc", "2.0"},
         {"id", next_request_id()},
@@ -174,7 +174,7 @@ json Client::initialize(const std::string & client_name, const std::string & cli
     return send_request(request);
 }
 
-void Client::send_initialized() {
+void StdioClient::send_initialized() {
     json notification = {
         {"jsonrpc", "2.0"},
         {"method", "notifications/initialized"}
@@ -183,7 +183,7 @@ void Client::send_initialized() {
     send_request(notification);
 }
 
-json Client::list_tools() {
+json StdioClient::list_tools() {
     json request = {
         {"jsonrpc", "2.0"},
         {"id", next_request_id()},
@@ -193,7 +193,7 @@ json Client::list_tools() {
     return send_request(request);
 }
 
-json Client::call_tool(const std::string & tool_name, const json & arguments) {
+json StdioClient::call_tool(const std::string & tool_name, const json & arguments) {
     json request = {
         {"jsonrpc", "2.0"},
         {"id", next_request_id()},
@@ -207,11 +207,11 @@ json Client::call_tool(const std::string & tool_name, const json & arguments) {
     return send_request(request);
 }
 
-int Client::next_request_id() {
+int StdioClient::next_request_id() {
     return ++request_id_counter_;
 }
 
-bool Client::wait_for_server_ready(int timeout_ms) {
+bool StdioClient::wait_for_server_ready(int timeout_ms) {
     auto start = std::chrono::steady_clock::now();
 
     while (std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -229,7 +229,7 @@ bool Client::wait_for_server_ready(int timeout_ms) {
     return false;
 }
 
-std::string Client::get_last_server_logs() {
+std::string StdioClient::get_last_server_logs() {
     std::stringstream logs;
 
     int flags = fcntl(fileno(server_stderr_), F_GETFL, 0);
