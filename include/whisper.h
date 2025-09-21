@@ -717,6 +717,15 @@ extern "C" {
     WHISPER_API void whisper_vad_free_segments(struct whisper_vad_segments * segments);
     WHISPER_API void whisper_vad_free         (struct whisper_vad_context  * ctx);
 
+    WHISPER_API bool whisper_vad(
+           struct whisper_context      * ctx,
+           struct whisper_state        * state,
+           struct whisper_full_params    params,
+                          const float  * samples,
+                                  int    n_samples,
+                               float  ** filtered_samples,
+                                int    * filtered_n_samples);
+
     ////////////////////////////////////////////////////////////////////////////
 
     // Temporary helpers needed for exposing ggml interface

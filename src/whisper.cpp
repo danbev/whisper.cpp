@@ -6621,15 +6621,16 @@ static void whisper_sequence_score(
     }
 }
 
-static bool whisper_vad(
-        struct whisper_context * ctx,
-          struct whisper_state * state,
-    struct whisper_full_params   params,
-                   const float * samples,
-                           int   n_samples,
-            std::vector<float> & filtered_samples) {
+bool whisper_vad(
+        struct whisper_context  * ctx,
+          struct whisper_state  * state,
+    struct whisper_full_params    params,
+                   const float  * samples,
+                           int    n_samples,
+                         float ** filtered_samples,
+                           int  * filtered_n_samples) {
     WHISPER_LOG_INFO("%s: VAD is enabled, processing speech segments only\n", __func__);
-    int filtered_n_samples = 0;
+    int total_filtered_samples = 0;
 
     // Clear any existing mapping table
     state->vad_mapping_table.clear();
@@ -6671,7 +6672,7 @@ static bool whisper_vad(
                 segment_end_samples += overlap_samples;
             }
             segment_end_samples = std::min(segment_end_samples, n_samples - 1);
-            filtered_n_samples  += (segment_end_samples - segment_start_samples);
+            total_filtered_samples  += (segment_end_samples - segment_start_samples);
 
             WHISPER_LOG_INFO("%s: Including segment %d: %.2f - %.2f (duration: %.2f)\n",
                 __func__, i, vad_segments->data[i].start/100.0,
@@ -6682,14 +6683,13 @@ static bool whisper_vad(
 
         int silence_samples = 0.1 * WHISPER_SAMPLE_RATE;
         int total_silence_samples = (vad_segments->data.size() > 1) ? (vad_segments->data.size() - 1) * silence_samples : 0;
-        int total_samples_needed = filtered_n_samples + total_silence_samples;
+        int total_samples_needed = total_filtered_samples + total_silence_samples;
 
         WHISPER_LOG_INFO("%s: total duration of speech segments: %.2f seconds\n",
-                        __func__, (float)filtered_n_samples / WHISPER_SAMPLE_RATE);
+                        __func__, (float)total_filtered_samples / WHISPER_SAMPLE_RATE);
 
-        try {
-            filtered_samples.resize(total_samples_needed);
-        } catch (const std::bad_alloc & /* e */) {
+        *filtered_samples = (float*)malloc(total_samples_needed * sizeof(float));
+        if (*filtered_samples == nullptr) {
             WHISPER_LOG_ERROR("%s: failed to allocate memory for filtered samples\n", __func__);
             whisper_vad_free_segments(vad_segments);
             whisper_vad_free(vctx);
@@ -6752,7 +6752,7 @@ static bool whisper_vad(
                 ctx->state->vad_segments.push_back(segment);
 
                 // Copy this speech segment
-                memcpy(filtered_samples.data() + offset, samples + segment_start_samples, segment_length * sizeof(float));
+                memcpy(*filtered_samples + offset, samples + segment_start_samples, segment_length * sizeof(float));
                 offset += segment_length;
 
                 // Add silence after this segment (except after the last segment)
@@ -6769,7 +6769,7 @@ static bool whisper_vad(
                     state->vad_mapping_table.push_back({silence_end_vad, orig_silence_end});
 
                     // Fill with zeros (silence)
-                    memset(filtered_samples.data() + offset, 0, silence_samples * sizeof(float));
+                    memset(*filtered_samples + offset, 0, silence_samples * sizeof(float));
                     offset += silence_samples;
                 }
             }
@@ -6793,11 +6793,16 @@ static bool whisper_vad(
 
         WHISPER_LOG_INFO("%s: Created time mapping table with %d points\n", __func__, (int)state->vad_mapping_table.size());
 
-        filtered_n_samples = offset;
+        *filtered_n_samples = offset;
         WHISPER_LOG_INFO("%s: Reduced audio from %d to %d samples (%.1f%% reduction)\n",
-                        __func__, n_samples, filtered_n_samples, 100.0f * (1.0f - (float)filtered_n_samples / n_samples));
+                        __func__, n_samples, *filtered_n_samples, 100.0f * (1.0f - (float)*filtered_n_samples / n_samples));
+    } else {
+        *filtered_samples = nullptr;
+        *filtered_n_samples = 0;
+        WHISPER_LOG_INFO("%s: No speech segments detected\n", __func__);
     }
 
+    whisper_vad_free_segments(vad_segments);
     return true;
 }
 
@@ -7725,21 +7730,28 @@ int whisper_full(
                    const float * samples,
                            int   n_samples) {
 
-    std::vector<float> vad_samples;
+    float * vad_samples = nullptr;
+    int vad_n_samples = 0;
     if (params.vad) {
         WHISPER_LOG_INFO("%s: VAD is enabled, processing speech segments only\n", __func__);
-        if (!whisper_vad(ctx, ctx->state, params, samples, n_samples, vad_samples)) {
+        if (!whisper_vad(ctx, ctx->state, params, samples, n_samples, &vad_samples, &vad_n_samples)) {
             WHISPER_LOG_ERROR("%s: failed to compute VAD\n", __func__);
             return -1;
         }
-        if (vad_samples.empty()) {
+        if (vad_samples == nullptr || vad_n_samples == 0) {
             ctx->state->result_all.clear();
             return 0;
         }
-        samples = vad_samples.data();
-        n_samples = vad_samples.size();
+        samples = vad_samples;
+        n_samples = vad_n_samples;
     }
-    return whisper_full_with_state(ctx, ctx->state, params, samples, n_samples);
+    int result = whisper_full_with_state(ctx, ctx->state, params, samples, n_samples);
+
+    if (vad_samples != nullptr) {
+        free(vad_samples);
+    }
+
+    return result;
 }
 
 int whisper_full_parallel(
@@ -7753,18 +7765,19 @@ int whisper_full_parallel(
         return whisper_full(ctx, params, samples, n_samples);
     }
 
-    std::vector<float> vad_samples;
+    float * vad_samples = nullptr;
+    int vad_n_samples = 0;
     if (params.vad) {
         WHISPER_LOG_INFO("%s: VAD is enabled, processing speech segments only\n", __func__);
-        if (!whisper_vad(ctx, ctx->state, params, samples, n_samples, vad_samples)) {
+        if (!whisper_vad(ctx, ctx->state, params, samples, n_samples, &vad_samples, &vad_n_samples)) {
             WHISPER_LOG_ERROR("%s: failed to compute VAD\n", __func__);
             return -1;
         }
-        if (vad_samples.empty()) {
+        if (vad_samples == nullptr || vad_n_samples == 0) {
             return 0;
         }
-        samples = vad_samples.data();
-        n_samples = vad_samples.size();
+        samples = vad_samples;
+        n_samples = vad_n_samples;
     }
     int ret = 0;
 
@@ -7868,6 +7881,10 @@ int whisper_full_parallel(
         WHISPER_LOG_WARN("%s: split %d - %s\n", __func__, (i + 1), to_timestamp(100*((i + 1)*n_samples_per_processor)/WHISPER_SAMPLE_RATE + offset_t).c_str());
     }
     WHISPER_LOG_WARN("%s: the transcription quality may be degraded near these boundaries\n", __func__);
+
+    if (vad_samples != nullptr) {
+        free(vad_samples);
+    }
 
     return ret;
 }
