@@ -1,0 +1,340 @@
+{
+  "version": 6,
+  "include": [
+    "CMakePresets.json"
+  ],
+  "configurePresets": [
+    {
+      "name": "danbev-whisper-dev-base",
+      "hidden": true,
+      "inherits": "base",
+      "description": "Common whisper.cpp developer build flags",
+      "cacheVariables": {
+        "WHISPER_BUILD_TESTS": "ON",
+        "WHISPER_BUILD_EXAMPLES": "ON",
+        "WHISPER_BUILD_SERVER": "ON"
+      }
+    },
+    {
+      "name": "danbev-whisper-curl",
+      "hidden": true,
+      "description": "Enable model downloads via libcurl",
+      "cacheVariables": {
+        "WHISPER_CURL": "ON"
+      }
+    },
+    {
+      "name": "danbev-cpu-base",
+      "hidden": true,
+      "inherits": ["danbev-whisper-dev-base", "danbev-whisper-curl"],
+      "description": "Common flags for all my CPU builds",
+      "cacheVariables": {
+        "GGML_NATIVE": "ON"
+      }
+    },
+    {
+      "name": "cpu-debug",
+      "displayName": "Local CPU Debug build",
+      "inherits": ["danbev-cpu-base", "debug"]
+    },
+    {
+      "name": "cpu-release",
+      "displayName": "Local CPU Release build",
+      "inherits": ["danbev-cpu-base", "release"]
+    },
+    {
+      "name": "cpu-reldbg",
+      "displayName": "Local CPU RelWithDebInfo build",
+      "inherits": ["danbev-cpu-base", "reldbg"]
+    },
+    {
+      "name": "danbev-cuda-base",
+      "hidden": true,
+      "inherits": ["danbev-whisper-dev-base", "danbev-whisper-curl"],
+      "description": "Common flags for all my CUDA builds",
+      "cacheVariables": {
+        "GGML_CUDA": "ON",
+        "GGML_CUDA_F16": "ON",
+        "GGML_NATIVE": "ON"
+      }
+    },
+    {
+      "name": "cuda-89-debug",
+      "displayName": "Local RTX 4070 (Arch 89)",
+      "inherits": ["danbev-cuda-base", "debug"],
+      "cacheVariables": {
+        "CMAKE_CUDA_ARCHITECTURES": "89",
+        "GGML_CUDA_DEBUG": "OFF",
+        "CMAKE_CUDA_FLAGS": "-G -g"
+      }
+    },
+    {
+      "name": "cuda-89-release",
+      "displayName": "Local RTX 4070 (Arch 89) Release",
+      "inherits": ["danbev-cuda-base", "release"],
+      "cacheVariables": {
+        "CMAKE_CUDA_ARCHITECTURES": "89"
+      }
+    },
+    {
+      "name": "cuda-89-reldbg",
+      "displayName": "Local RTX 4070 (Arch 89) RelWithDebInfo",
+      "inherits": ["danbev-cuda-base", "reldbg"],
+      "cacheVariables": {
+        "CMAKE_CUDA_ARCHITECTURES": "89",
+        "CMAKE_CUDA_FLAGS": "-g"
+      }
+    },
+    {
+      "name": "dgx-spark-debug",
+      "displayName": "DGX Spark Debug",
+      "inherits": ["danbev-cuda-base", "debug"],
+      "description": "Standard debug build for DGX, auto-detects arch"
+    },
+    {
+      "name": "dgx-spark-release",
+      "displayName": "DGX Spark Release",
+      "inherits": ["danbev-cuda-base", "release"],
+      "description": "Standard release build for DGX, auto-detects arch"
+    },
+    {
+      "name": "danbev-webgpu-base",
+      "hidden": true,
+      "inherits": "danbev-whisper-dev-base",
+      "description": "Common flags for all my WebGPU builds",
+      "cacheVariables": {
+        "GGML_WEBGPU": "ON",
+        "GGML_METAL": "OFF",
+        "GGML_BLAS": "OFF"
+      }
+    },
+    {
+      "name": "webgpu-debug",
+      "displayName": "WebGPU Debug",
+      "inherits": ["danbev-webgpu-base", "debug"],
+      "description": "WebGPU debug build with Dawn"
+    },
+    {
+      "name": "webgpu-release",
+      "displayName": "WebGPU Release",
+      "inherits": ["danbev-webgpu-base", "release"],
+      "description": "WebGPU release build with Dawn"
+    },
+    {
+      "name": "danbev-coreml-base",
+      "hidden": true,
+      "inherits": "danbev-whisper-dev-base",
+      "description": "Common flags for all my Core ML builds",
+      "cacheVariables": {
+        "WHISPER_COREML": "ON",
+        "WHISPER_COREML_ALLOW_FALLBACK": "ON"
+      }
+    },
+    {
+      "name": "coreml-debug",
+      "displayName": "Core ML Debug",
+      "inherits": ["danbev-coreml-base", "debug"]
+    },
+    {
+      "name": "coreml-release",
+      "displayName": "Core ML Release",
+      "inherits": ["danbev-coreml-base", "release"]
+    },
+    {
+      "name": "danbev-openvino-base",
+      "hidden": true,
+      "inherits": "danbev-whisper-dev-base",
+      "description": "Common flags for all my OpenVINO builds",
+      "cacheVariables": {
+        "WHISPER_OPENVINO": "ON"
+      }
+    },
+    {
+      "name": "openvino-debug",
+      "displayName": "OpenVINO Debug",
+      "inherits": ["danbev-openvino-base", "debug"]
+    },
+    {
+      "name": "openvino-release",
+      "displayName": "OpenVINO Release",
+      "inherits": ["danbev-openvino-base", "release"]
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "base-build",
+      "hidden": true,
+      "jobs": 12
+    },
+    {
+      "name": "cpu-debug",
+      "configurePreset": "cpu-debug",
+      "inherits": "base-build"
+    },
+    {
+      "name": "cpu-release",
+      "configurePreset": "cpu-release",
+      "inherits": "base-build"
+    },
+    {
+      "name": "cpu-reldbg",
+      "configurePreset": "cpu-reldbg",
+      "inherits": "base-build"
+    },
+    {
+      "name": "cuda-89-debug",
+      "configurePreset": "cuda-89-debug",
+      "inherits": "base-build"
+    },
+    {
+      "name": "cuda-89-release",
+      "configurePreset": "cuda-89-release",
+      "inherits": "base-build"
+    },
+    {
+      "name": "cuda-89-reldbg",
+      "configurePreset": "cuda-89-reldbg",
+      "inherits": "base-build"
+    },
+    {
+      "name": "dgx-spark-debug",
+      "configurePreset": "dgx-spark-debug",
+      "inherits": "base-build"
+    },
+    {
+      "name": "dgx-spark-release",
+      "configurePreset": "dgx-spark-release",
+      "inherits": "base-build"
+    },
+    {
+      "name": "webgpu-debug",
+      "configurePreset": "webgpu-debug",
+      "inherits": "base-build"
+    },
+    {
+      "name": "webgpu-release",
+      "configurePreset": "webgpu-release",
+      "inherits": "base-build"
+    },
+    {
+      "name": "coreml-debug",
+      "configurePreset": "coreml-debug",
+      "inherits": "base-build"
+    },
+    {
+      "name": "coreml-release",
+      "configurePreset": "coreml-release",
+      "inherits": "base-build"
+    },
+    {
+      "name": "openvino-debug",
+      "configurePreset": "openvino-debug",
+      "inherits": "base-build"
+    },
+    {
+      "name": "openvino-release",
+      "configurePreset": "openvino-release",
+      "inherits": "base-build"
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "dgx-spark-debug",
+      "steps": [
+        { "type": "configure", "name": "dgx-spark-debug" },
+        { "type": "build", "name": "dgx-spark-debug" }
+      ]
+    },
+    {
+      "name": "dgx-spark-release",
+      "steps": [
+        { "type": "configure", "name": "dgx-spark-release" },
+        { "type": "build", "name": "dgx-spark-release" }
+      ]
+    },
+    {
+      "name": "cuda-89-debug",
+      "steps": [
+        { "type": "configure", "name": "cuda-89-debug" },
+        { "type": "build", "name": "cuda-89-debug" }
+      ]
+    },
+    {
+      "name": "cuda-89-release",
+      "steps": [
+        { "type": "configure", "name": "cuda-89-release" },
+        { "type": "build", "name": "cuda-89-release" }
+      ]
+    },
+    {
+      "name": "cuda-89-reldbg",
+      "steps": [
+        { "type": "configure", "name": "cuda-89-reldbg" },
+        { "type": "build", "name": "cuda-89-reldbg" }
+      ]
+    },
+    {
+      "name": "webgpu-debug",
+      "steps": [
+        { "type": "configure", "name": "webgpu-debug" },
+        { "type": "build", "name": "webgpu-debug" }
+      ]
+    },
+    {
+      "name": "webgpu-release",
+      "steps": [
+        { "type": "configure", "name": "webgpu-release" },
+        { "type": "build", "name": "webgpu-release" }
+      ]
+    },
+    {
+      "name": "coreml-debug",
+      "steps": [
+        { "type": "configure", "name": "coreml-debug" },
+        { "type": "build", "name": "coreml-debug" }
+      ]
+    },
+    {
+      "name": "coreml-release",
+      "steps": [
+        { "type": "configure", "name": "coreml-release" },
+        { "type": "build", "name": "coreml-release" }
+      ]
+    },
+    {
+      "name": "openvino-debug",
+      "steps": [
+        { "type": "configure", "name": "openvino-debug" },
+        { "type": "build", "name": "openvino-debug" }
+      ]
+    },
+    {
+      "name": "openvino-release",
+      "steps": [
+        { "type": "configure", "name": "openvino-release" },
+        { "type": "build", "name": "openvino-release" }
+      ]
+    },
+    {
+      "name": "cpu-debug",
+      "steps": [
+        { "type": "configure", "name": "cpu-debug" },
+        { "type": "build", "name": "cpu-debug" }
+      ]
+    },
+    {
+      "name": "cpu-release",
+      "steps": [
+        { "type": "configure", "name": "cpu-release" },
+        { "type": "build", "name": "cpu-release" }
+      ]
+    },
+    {
+      "name": "cpu-reldbg",
+      "steps": [
+        { "type": "configure", "name": "cpu-reldbg" },
+        { "type": "build", "name": "cpu-reldbg" }
+      ]
+    }
+  ]
+}
