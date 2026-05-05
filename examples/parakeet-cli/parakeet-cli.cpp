@@ -35,6 +35,34 @@ static char * requires_value_error(const std::string & arg) {
     exit(1);
 }
 
+static std::string trim(const std::string & line) {
+    const size_t first = line.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return "";
+    }
+
+    const size_t last = line.find_last_not_of(" \t\r\n");
+    return line.substr(first, last - first + 1);
+}
+
+static void parakeet_params_add_file_list(const std::string & fname, parakeet_params & params) {
+    std::ifstream fin(fname);
+    if (!fin.is_open()) {
+        fprintf(stderr, "error: failed to open file list '%s'\n", fname.c_str());
+        exit(1);
+    }
+
+    std::string line;
+    while (std::getline(fin, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+
+        params.fname_inp.push_back(line);
+    }
+}
+
 static bool parakeet_params_parse(int argc, char ** argv, parakeet_params & params) {
     if (const char * env_device = std::getenv("PARAKEET_ARG_DEVICE")) {
         params.gpu_device = std::stoi(env_device);
@@ -64,6 +92,7 @@ static bool parakeet_params_parse(int argc, char ** argv, parakeet_params & para
         else if (arg == "-rc"   || arg == "--right-context")   { params.right_context_ms  = std::stoi(ARGV_NEXT); }
         else if (arg == "-m"    || arg == "--model")           { params.model             = ARGV_NEXT; }
         else if (arg == "-f"    || arg == "--file")            { params.fname_inp.emplace_back(ARGV_NEXT); }
+        else if (arg == "-fl"   || arg == "--file-list")       { parakeet_params_add_file_list(ARGV_NEXT, params); }
         else if (arg == "-ng"   || arg == "--no-gpu")          { params.use_gpu           = false; }
         else if (arg == "-dev"  || arg == "--device")          { params.gpu_device        = std::stoi(ARGV_NEXT); }
         else if (arg == "-fa"   || arg == "--flash-attn")      { params.flash_attn        = false; }
@@ -95,6 +124,7 @@ static void parakeet_print_usage(int /*argc*/, char ** argv, const parakeet_para
     fprintf(stderr, "  -rc N,  --right-context N   [%-7d] right context in milliseconds\n",               params.right_context_ms);
     fprintf(stderr, "  -m,     --model FILE        [%-7s] model path\n",                                  params.model.c_str());
     fprintf(stderr, "  -f,     --file FILE         [%-7s] input audio file\n",                            "");
+    fprintf(stderr, "  -fl,    --file-list FILE    [%-7s] text file containing one input audio path per line\n", "");
     fprintf(stderr, "  -ng,    --no-gpu            [%-7s] disable GPU\n",                                 params.use_gpu ? "false" : "true");
     fprintf(stderr, "  -dev N, --device N          [%-7d] GPU device to use\n",                           params.gpu_device);
     fprintf(stderr, "  -fa,    --flash-attn        [%-7s] enable flash attention\n",                      params.flash_attn ? "true" : "false");
@@ -139,6 +169,32 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    if (!params.output_file.empty() && params.fname_inp.size() > 1) {
+        fprintf(stderr, "error: --output-file cannot be used with multiple input files\n");
+        return 1;
+    }
+
+    struct parakeet_context_params ctx_params = parakeet_context_default_params();
+    ctx_params.use_gpu     = params.use_gpu;
+    ctx_params.flash_attn  = params.flash_attn;
+    ctx_params.gpu_device  = params.gpu_device;
+
+    if (!params.no_prints) {
+        fprintf(stderr, "Loading Parakeet model from: %s\n", params.model.c_str());
+    }
+
+    struct parakeet_context * pctx = parakeet_init_from_file_with_params(params.model.c_str(), ctx_params);
+    if (pctx == nullptr) {
+        fprintf(stderr, "error: failed to load Parakeet model from '%s'\n", params.model.c_str());
+        return 1;
+    }
+
+    if (!params.no_prints) {
+        fprintf(stderr, "Successfully loaded Parakeet model\n");
+        fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
+                params.n_threads, (int32_t) std::thread::hardware_concurrency(), parakeet_print_system_info());
+    }
+
     // Process each input file
     for (const auto & fname : params.fname_inp) {
         if (!params.no_prints) {
@@ -158,24 +214,6 @@ int main(int argc, char ** argv) {
         }
 
         if (!params.no_prints) {
-            fprintf(stderr, "Loading Parakeet model from: %s\n", params.model.c_str());
-        }
-
-        struct parakeet_context_params ctx_params = parakeet_context_default_params();
-        ctx_params.use_gpu     = params.use_gpu;
-        ctx_params.flash_attn  = params.flash_attn;
-        ctx_params.gpu_device  = params.gpu_device;
-
-        struct parakeet_context * pctx = parakeet_init_from_file_with_params(params.model.c_str(), ctx_params);
-        if (pctx == nullptr) {
-            fprintf(stderr, "error: failed to load Parakeet model from '%s'\n", params.model.c_str());
-            return 1;
-        }
-
-        if (!params.no_prints) {
-            fprintf(stderr, "Successfully loaded Parakeet model\n");
-            fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
-                    params.n_threads, (int32_t) std::thread::hardware_concurrency(), parakeet_print_system_info());
             fprintf(stderr, "Processing audio (%zu samples, %.2f seconds)\n",
                     pcmf32.size(), (float)pcmf32.size() / PARAKEET_SAMPLE_RATE);
         }
@@ -197,7 +235,6 @@ int main(int argc, char ** argv) {
 
         if (ret != 0) {
             fprintf(stderr, "error: failed to process audio file '%s'\n", fname.c_str());
-            parakeet_free(pctx);
             continue;
         }
 
@@ -220,10 +257,6 @@ int main(int argc, char ** argv) {
             } else {
                 fprintf(stderr, "error: failed to open '%s' for writing\n", fname_out.c_str());
             }
-        }
-
-        if (!params.no_prints) {
-            parakeet_print_timings(pctx);
         }
 
         if (params.print_segments) {
@@ -259,8 +292,12 @@ int main(int argc, char ** argv) {
             }
         }
 
-        parakeet_free(pctx);
     }
+
+    if (!params.no_prints) {
+        parakeet_print_timings(pctx);
+    }
+    parakeet_free(pctx);
 
     return 0;
 }

@@ -1,6 +1,7 @@
 __pycache__
 *.tar.gz
 *.txt
+!requirements.txt
 eval.conf
 venv
 LibriSpeech
