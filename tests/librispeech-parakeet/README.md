@@ -55,9 +55,9 @@ performance of parakeet.cpp on LibriSpeech corpus.
 
 ## Makefile runner
 
-The checked-in `Makefile`/`eval.mk` runner is a Unix-style path that expects
-tools such as `make`, `wget`, `tar`, `mv`, and `rm`. It invokes `parakeet-cli`
-once per audio file and then runs `eval.py`.
+The checked-in `Makefile`/`eval.mk` runner uses `make` plus commands such as
+`wget`, `tar`, `mv`, and `rm`. It invokes the configured `parakeet-cli` once
+per audio file and then runs `eval.py`.
 
 ## How-to guides
 
