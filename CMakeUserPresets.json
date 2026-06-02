@@ -158,6 +158,60 @@
       "name": "openvino-release",
       "displayName": "OpenVINO Release",
       "inherits": ["danbev-openvino-base", "release"]
+    },
+    {
+      "name": "danbev-metal-base",
+      "hidden": true,
+      "inherits": ["danbev-whisper-dev-base", "danbev-whisper-curl"],
+      "description": "Common flags for all my Metal builds",
+      "cacheVariables": {
+        "GGML_METAL": "ON",
+        "GGML_NATIVE": "ON"
+      }
+    },
+    {
+      "name": "metal-debug",
+      "displayName": "Metal Debug",
+      "inherits": ["danbev-metal-base", "debug"],
+      "description": "Metal debug build for macOS"
+    },
+    {
+      "name": "metal-release",
+      "displayName": "Metal Release",
+      "inherits": ["danbev-metal-base", "release"],
+      "description": "Metal release build for macOS"
+    },
+    {
+      "name": "danbev-asan",
+      "hidden": true,
+      "description": "AddressSanitizer configuration",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address"
+      }
+    },
+    {
+      "name": "danbev-tsan",
+      "hidden": true,
+      "description": "ThreadSanitizer configuration",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread"
+      }
+    },
+    {
+      "name": "cpu-asan",
+      "displayName": "CPU with AddressSanitizer",
+      "inherits": ["danbev-cpu-base", "debug", "danbev-asan"]
+    },
+    {
+      "name": "cpu-tsan",
+      "displayName": "CPU with ThreadSanitizer",
+      "inherits": ["danbev-cpu-base", "debug", "danbev-tsan"]
     }
   ],
   "buildPresets": [
@@ -234,6 +288,26 @@
     {
       "name": "openvino-release",
       "configurePreset": "openvino-release",
+      "inherits": "base-build"
+    },
+    {
+      "name": "metal-debug",
+      "configurePreset": "metal-debug",
+      "inherits": "base-build"
+    },
+    {
+      "name": "metal-release",
+      "configurePreset": "metal-release",
+      "inherits": "base-build"
+    },
+    {
+      "name": "cpu-asan",
+      "configurePreset": "cpu-asan",
+      "inherits": "base-build"
+    },
+    {
+      "name": "cpu-tsan",
+      "configurePreset": "cpu-tsan",
       "inherits": "base-build"
     }
   ],
@@ -316,6 +390,20 @@
       ]
     },
     {
+      "name": "metal-debug",
+      "steps": [
+        { "type": "configure", "name": "metal-debug" },
+        { "type": "build", "name": "metal-debug" }
+      ]
+    },
+    {
+      "name": "metal-release",
+      "steps": [
+        { "type": "configure", "name": "metal-release" },
+        { "type": "build", "name": "metal-release" }
+      ]
+    },
+    {
       "name": "cpu-debug",
       "steps": [
         { "type": "configure", "name": "cpu-debug" },
@@ -334,6 +422,20 @@
       "steps": [
         { "type": "configure", "name": "cpu-reldbg" },
         { "type": "build", "name": "cpu-reldbg" }
+      ]
+    },
+    {
+      "name": "cpu-asan",
+      "steps": [
+        { "type": "configure", "name": "cpu-asan" },
+        { "type": "build", "name": "cpu-asan" }
+      ]
+    },
+    {
+      "name": "cpu-tsan",
+      "steps": [
+        { "type": "configure", "name": "cpu-tsan" },
+        { "type": "build", "name": "cpu-tsan" }
       ]
     }
   ]
