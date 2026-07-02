@@ -46,7 +46,7 @@ def build_model_card(uploaded_variants):
         f"",
         f"Build parakeet-cli:",
         f"```console",
-        f"git clone https://github.com/ggml-org/whisper.cpp.git",
+        f"git clone -b parakeet-streaming https://github.com/danbev/whisper.cpp.git",
         f"cd whisper.cpp",
         f"cmake -B build -S .",
         f"cmake --build build --target parakeet-cli -j $(nproc)",
