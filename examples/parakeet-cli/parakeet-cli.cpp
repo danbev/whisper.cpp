@@ -19,6 +19,8 @@ struct parakeet_params {
     bool output_txt     = false;
     bool no_prints      = false;
 
+    std::string lang_tag   = "";
+
     std::string model       = "models/ggml-parakeet-tdt-0.6b-v3.bin";
     std::string output_file = "";
     std::vector<std::string> fname_inp = {};
@@ -63,6 +65,7 @@ static bool parakeet_params_parse(int argc, char ** argv, parakeet_params & para
         else if (arg == "-otxt" || arg == "--output-txt")      { params.output_txt        = true; }
         else if (arg == "-of"   || arg == "--output-file")     { params.output_file       = ARGV_NEXT; }
         else if (arg == "-np"   || arg == "--no-prints")       { params.no_prints         = true; }
+        else if (arg == "-l"    || arg == "--lang")            { params.lang_tag          = ARGV_NEXT; }
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             parakeet_print_usage(argc, argv, params);
@@ -86,6 +89,7 @@ static void parakeet_print_usage(int /*argc*/, char ** argv, const parakeet_para
     fprintf(stderr, "  -ng,    --no-gpu            [%-7s] disable GPU\n",                                 params.use_gpu ? "false" : "true");
     fprintf(stderr, "  -dev N, --device N          [%-7d] GPU device to use\n",                           params.gpu_device);
     fprintf(stderr, "  -ps,    --print-segments    [%-7s] print segment information\n",                   params.print_segments ? "true" : "false");
+    fprintf(stderr, "  -l TAG, --lang TAG          [%-7s] streaming language tag\n",      params.lang_tag.c_str());
     fprintf(stderr, "  -otxt,  --output-txt        [%-7s] output result in a text file\n",                params.output_txt ? "true" : "false");
     fprintf(stderr, "  -of,    --output-file FILE  [%-7s] output file path (without file extension)\n",   "");
     fprintf(stderr, "  -np,    --no-prints         [%-7s] do not print anything other than the results\n", params.no_prints ? "true" : "false");
@@ -167,6 +171,9 @@ int main(int argc, char ** argv) {
         bool is_first = true;
         struct parakeet_full_params full_params = parakeet_full_default_params(PARAKEET_SAMPLING_GREEDY);
         full_params.n_threads           = params.n_threads;
+        if (!params.lang_tag.empty()) {
+            full_params.lang_tag = params.lang_tag.c_str();
+        }
         full_params.new_token_callback  = token_callback;
         full_params.new_token_callback_user_data = &is_first;
 

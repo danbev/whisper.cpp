@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-# Convert Parakeet TDT model from NeMo format to ggml format
+# Convert Parakeet model from NeMo format to ggml format.
 #
 # Usage: python convert-parakeet-to-ggml.py --model parakeet-model.nemo --output-dir output-dir [--use-f32]
 #
-# The NeMo file is a tar archive containing:
-#   - model_weights.ckpt (PyTorch checkpoint)
-#   - model_config.yaml (model configuration)
-#   - tokenizer files
-#
 # This script extracts the NeMo archive, loads the model weights and configuration,
-# and saves them in ggml format compatible with whisper.cpp.
+# and saves them in ggml format compatible with parakeet.cpp (whisper.cpp's implementation).
 #
-
 import torch
 import argparse
 import io
@@ -45,19 +39,36 @@ def load_model_config(config_path):
 
 def load_tokenizer(extract_dir, config):
     tokenizer_model_path = None
-    tokenizer_vocab_path = None
 
     for file in os.listdir(extract_dir):
         if file.endswith('_tokenizer.model'):
             tokenizer_model_path = os.path.join(extract_dir, file)
-        elif file.endswith('tokenizer.vocab'):
-            tokenizer_vocab_path = os.path.join(extract_dir, file)
 
     if not tokenizer_model_path:
         raise FileNotFoundError("Tokenizer model file not found")
 
+    try:
+        import sentencepiece as spm
+        sp = spm.SentencePieceProcessor()
+        sp.Load(tokenizer_model_path)
+        n = sp.GetPieceSize()
+        tokens = {}
+        for i in range(n):
+            piece = sp.IdToPiece(i)
+            tokens[piece.encode('utf-8')] = i
+        print(f"Loaded {len(tokens)} tokens from SentencePiece model {os.path.basename(tokenizer_model_path)}")
+        return tokens
+    except ImportError:
+        pass
+
+    # Fallback to reading the vocab.txt that ships with the .nemo archive.
+    tokenizer_vocab_path = None
+    for file in os.listdir(extract_dir):
+        if file.endswith('tokenizer.vocab') or file.endswith('_vocab.txt'):
+            tokenizer_vocab_path = os.path.join(extract_dir, file)
+
     if not tokenizer_vocab_path:
-        raise FileNotFoundError("Tokenizer vocab file not found")
+        raise FileNotFoundError("Tokenizer vocab file not found (install sentencepiece for best results)")
 
     tokens = {}
     with open(tokenizer_vocab_path, 'r', encoding='utf-8') as f:
@@ -68,11 +79,20 @@ def load_tokenizer(extract_dir, config):
                 tokens[token.encode('utf-8')] = idx
 
     print(f"Loaded {len(tokens)} tokens from {os.path.basename(tokenizer_vocab_path)}")
-
-    if len(tokens) != 8192:
-        print(f"WARNING: Expected 8192 tokens, got {len(tokens)}")
-
     return tokens
+
+def parse_mel_normalize(normalize):
+    if normalize is None:
+        return 0
+
+    value = str(normalize).strip().lower()
+    if value in ('na', 'NA', 'none', 'null', 'false'):
+        return 0
+    if value == 'per_feature':
+        return 1
+
+    raise ValueError(f"Unsupported preprocessor.normalize value: {normalize!r}")
+
 
 def write_tensor(fout, name, data, use_f16=True, force_f32=False):
     if 'pre_encode.conv' in name and 'bias' in name and len(data.shape) == 1:
@@ -155,13 +175,55 @@ def convert_parakeet_to_ggml(nemo_path, output_dir, use_f16=True, out_name=None)
             'n_pred_dim': config['decoder']['prednet']['pred_hidden'],
             'n_pred_layers': config['decoder']['prednet']['pred_rnn_layers'],
             'n_vocab': config['decoder']['vocab_size'],
-            'n_tdt_durations': config['model_defaults']['num_tdt_durations'],
+            'n_tdt_durations': config['model_defaults'].get('num_tdt_durations', 0),
             'n_max_tokens': config['decoding']['greedy']['max_symbols'],
         }
+
+        hparams['n_lang_slots'] = config['model_defaults'].get('num_prompts', 0)
+        hparams['mel_normalize'] = parse_mel_normalize(config.get('preprocessor', {}).get('normalize', 'per_feature'))
+        prompt_dictionary = {}
+        if hparams['n_lang_slots'] > 0:
+            prompt_dictionary = dict(config.get('model_defaults', {}).get('prompt_dictionary', {}))
+
+        # Derive n_pre_enc_features from the actual weight rather than recomputing,
+        # since CausalConv2D padding varies between model families.
+        pre_enc_key = next((k for k in state_dict if 'pre_encode.out.weight' in k or 'pre_encode.linear.weight' in k), None)
+        if pre_enc_key:
+            hparams['n_pre_enc_features'] = state_dict[pre_enc_key].shape[1]
+        else:
+            hparams['n_pre_enc_features'] = (hparams['n_mels'] // hparams['subsampling_factor']) * hparams['n_subsampling_channels']
+
+        # Limited attention context for streaming models. att_context_size is either:
+        # * A flat pair [-1, -1] (TDT/RNNT full attention or single-mode local attention).
+        # * A list of [left, right] pairs for multi-lookahead streaming.
+        # NeMo inference uses one active mode at a time, initialized from the first
+        # configured pair. Persist the full list directly in the model header.
+        att_context_size = config.get('encoder', {}).get('att_context_size', None)
+        att_context_pairs = []
+        if att_context_size and isinstance(att_context_size, list) and len(att_context_size) > 0:
+            if isinstance(att_context_size[0], (list, tuple)):
+                att_context_pairs = [(int(left), int(right)) for left, right in att_context_size]
+            else:
+                att_context_pairs = [(int(att_context_size[0]), int(att_context_size[1]))]
+
+        if hparams['n_lang_slots'] > 0 and not att_context_pairs:
+            raise ValueError('Streaming model is missing att_context_size metadata')
+
+        # KV attention cache depth for streaming models.
+        # For chunked_limited attention, last_channel_cache_size == att_left (the left context window).
+        att_context_style = config.get('encoder', {}).get('att_context_style', None)
+        if att_context_style == 'chunked_limited' and att_context_pairs:
+            hparams['n_last_channel_cache'] = att_context_pairs[0][0]
+        else:
+            hparams['n_last_channel_cache'] = 0
 
         print("\nGGML hyperparameters:")
         for key, value in hparams.items():
             print(f"  {key}: {value}")
+        print(f"  mel_normalize_name: {config.get('preprocessor', {}).get('normalize', 'per_feature')}")
+        print(f"  prompt_dictionary_entries: {len(prompt_dictionary)}")
+        if att_context_pairs:
+            print(f"  att_context_size: {att_context_pairs}")
 
         # Create output file
         if out_name:
@@ -190,6 +252,21 @@ def convert_parakeet_to_ggml(nemo_path, output_dir, use_f16=True, out_name=None)
             fout.write(struct.pack("i", hparams['n_pred_layers']))
             fout.write(struct.pack("i", hparams['n_tdt_durations']))
             fout.write(struct.pack("i", hparams['n_max_tokens']))
+            fout.write(struct.pack("i", hparams['n_pre_enc_features']))
+            fout.write(struct.pack("i", hparams['n_lang_slots']))
+            fout.write(struct.pack("i", hparams['mel_normalize']))
+            fout.write(struct.pack("i", hparams['n_last_channel_cache']))
+            fout.write(struct.pack("i", len(att_context_pairs)))
+            for left, right in att_context_pairs:
+                fout.write(struct.pack("i", left))
+                fout.write(struct.pack("i", right))
+
+            fout.write(struct.pack("i", len(prompt_dictionary)))
+            for tag, idx in sorted(prompt_dictionary.items()):
+                tag_bytes = str(tag).encode('utf-8')
+                fout.write(struct.pack("I", len(tag_bytes)))
+                fout.write(tag_bytes)
+                fout.write(struct.pack("i", int(idx)))
 
             # Extract mel filterbank from model
             fb_key = None
@@ -255,8 +332,8 @@ def convert_parakeet_to_ggml(nemo_path, output_dir, use_f16=True, out_name=None)
             for i in range(n_window):
                 fout.write(struct.pack("f", window[i]))
 
-            # Write TDT durations
-            tdt_durations = config['model_defaults']['tdt_durations']
+            # Write TDT durations (empty for RNNT models)
+            tdt_durations = config['model_defaults'].get('tdt_durations', [])
             if len(tdt_durations) != hparams['n_tdt_durations']:
                 raise ValueError(f"TDT durations count mismatch: {len(tdt_durations)} vs {hparams['n_tdt_durations']}")
 

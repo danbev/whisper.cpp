@@ -63,6 +63,12 @@ enum parakeet_tensor {
     PARAKEET_TENSOR_JOINT_ENC_BIAS,
     PARAKEET_TENSOR_JOINT_NET_WEIGHT,
     PARAKEET_TENSOR_JOINT_NET_BIAS,
+
+    // Language conditioning MLP (streaming models only)
+    PARAKEET_TENSOR_LANG_KERNEL_0_WEIGHT,
+    PARAKEET_TENSOR_LANG_KERNEL_0_BIAS,
+    PARAKEET_TENSOR_LANG_KERNEL_2_WEIGHT,
+    PARAKEET_TENSOR_LANG_KERNEL_2_BIAS,
 };
 
 static const std::map<parakeet_tensor, const char *> PARAKEET_TENSOR_NAMES = {
@@ -124,6 +130,12 @@ static const std::map<parakeet_tensor, const char *> PARAKEET_TENSOR_NAMES = {
     {PARAKEET_TENSOR_JOINT_ENC_BIAS,              "joint.enc.bias"},
     {PARAKEET_TENSOR_JOINT_NET_WEIGHT,            "joint.joint_net.2.weight"},
     {PARAKEET_TENSOR_JOINT_NET_BIAS,              "joint.joint_net.2.bias"},
+
+    // Language conditioning MLP (streaming models only)
+    {PARAKEET_TENSOR_LANG_KERNEL_0_WEIGHT,        "prompt_kernel.0.weight"},
+    {PARAKEET_TENSOR_LANG_KERNEL_0_BIAS,          "prompt_kernel.0.bias"},
+    {PARAKEET_TENSOR_LANG_KERNEL_2_WEIGHT,        "prompt_kernel.2.weight"},
+    {PARAKEET_TENSOR_LANG_KERNEL_2_BIAS,          "prompt_kernel.2.bias"},
 };
 
 static const std::map<parakeet_tensor, ggml_op> PARAKEET_TENSOR_INFO = {
@@ -185,4 +197,10 @@ static const std::map<parakeet_tensor, ggml_op> PARAKEET_TENSOR_INFO = {
     {PARAKEET_TENSOR_JOINT_ENC_BIAS,              GGML_OP_ADD},
     {PARAKEET_TENSOR_JOINT_NET_WEIGHT,            GGML_OP_MUL_MAT},
     {PARAKEET_TENSOR_JOINT_NET_BIAS,              GGML_OP_ADD},
+
+    // Language conditioning MLP (streaming models only)
+    {PARAKEET_TENSOR_LANG_KERNEL_0_WEIGHT,        GGML_OP_MUL_MAT},
+    {PARAKEET_TENSOR_LANG_KERNEL_0_BIAS,          GGML_OP_ADD},
+    {PARAKEET_TENSOR_LANG_KERNEL_2_WEIGHT,        GGML_OP_MUL_MAT},
+    {PARAKEET_TENSOR_LANG_KERNEL_2_BIAS,          GGML_OP_ADD},
 };

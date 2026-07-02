@@ -243,6 +243,7 @@ extern "C" {
         bool no_context;        // do not use past transcription (if any) as context
 
         int  audio_ctx;         // overwrite the audio context size (0 = use default)
+        const char * lang_tag;  // streaming language prompt tag (nullptr = model default slot)
 
         // called for every newly generated text segment
         parakeet_new_segment_callback new_segment_callback;

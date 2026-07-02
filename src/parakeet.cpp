@@ -238,6 +238,7 @@ struct parakeet_vocab {
     id token_bos;
     id token_blank;
     id token_eos;
+
 };
 
 struct parakeet_segment {
@@ -267,11 +268,10 @@ struct parakeet_sched {
     std::vector<uint8_t> meta;
 };
 
-// TODO: Find out is there a multiple version types. It is not yet clear to me
-// at this point.
 enum parakeet_arch {
-    PARAKEET_ARCH_UNKNOWN = 0,
-    PARAKEET_ARCH_TDT     = 1,  // NVIDIA Parakeet TDT (RNN-T)
+    PARAKEET_ARCH_UNKNOWN   = 0,
+    PARAKEET_ARCH_TDT       = 1,  // NVIDIA Parakeet TDT
+    PARAKEET_ARCH_STREAMING = 2,  // RNNT with language conditioning (streaming)
 };
 
 struct parakeet_hparams {
@@ -291,6 +291,26 @@ struct parakeet_hparams {
     int32_t n_pred_layers          = 2;
     int32_t n_tdt_durations        = 5;
     int32_t n_max_tokens           = 10;
+    int32_t n_pre_enc_features     = 0;
+
+    // Streaming model specific hyper parameters
+    int32_t n_lang_slots           = 0;
+
+    // log-mel normalization value from the source model config.
+    // Current offline/TDT models use per-feature normalization, whereas streaming
+    // models disable it because only chunks of the complete audio are received
+    // and normalizing per chunk can lead to instability in the model.
+    bool mel_normalize             = true;
+
+    // Streaming specific hyper params
+    int32_t n_last_channel_cache   = 0;
+    // The model supports multiple attention context sizes, defining how many
+    // historical (left) and lookahead (right) downsampled frames can be
+    // attended to simultaneously. While training randomly samples across these
+    // pairs to ensure multi-latency robustness, inference defaults to a single
+    // active configuration (like [56, 3] for 320ms latency). We store the full
+    // array here for possible future usage.
+    std::vector<std::pair<int32_t, int32_t>> attn_context_sizes;
 
     parakeet_arch arch     = PARAKEET_ARCH_TDT;
 };
@@ -379,14 +399,24 @@ struct parakeet_model {
 
     parakeet_joint_network joint;
 
-    std::vector<uint32_t> tdt_durations;
-
     std::vector<ggml_context *> ctxs;
 
     std::vector<ggml_backend_buffer_t> buffers;
 
     int n_loaded = 0;
     std::map<std::string, struct ggml_tensor *> tensors;
+
+    // TDT model specific fields.
+    std::vector<uint32_t> tdt_durations;
+
+    // Streaming model specific fields.
+    std::map<std::string, int32_t> prompt_dict;
+
+    // Language conditioning MLP (streaming models only)
+    struct ggml_tensor * lang_kernel_0_w  = nullptr;
+    struct ggml_tensor * lang_kernel_0_b  = nullptr;
+    struct ggml_tensor * lang_kernel_2_w  = nullptr;
+    struct ggml_tensor * lang_kernel_2_b  = nullptr;
 };
 
 struct parakeet_lstm_state_layer {
@@ -423,7 +453,8 @@ struct parakeet_state {
 
     parakeet_batch batch;
 
-    int n_frames = 0;
+    int n_frames  = 0;
+    int lang_idx  = 0;  // index into prompt_dictionary for streaming models
 
     std::vector<ggml_backend_t> backends;
 
@@ -456,6 +487,23 @@ struct parakeet_state {
 
     int32_t n_audio_ctx = 0;
     int32_t sched_encode_n_audio_ctx = 0;
+
+    // Cache-based streaming encoder state (PARAKEET_ARCH_STREAMING only)
+    struct {
+        std::vector<struct ggml_tensor *> kv_cache;
+        std::vector<struct ggml_tensor *> kv_cache_next;
+        std::vector<struct ggml_tensor *> conv_cache;
+        std::vector<struct ggml_tensor *> conv_cache_next;
+        std::vector<uint8_t> ctx_buf;
+        ggml_backend_buffer_t buffer = nullptr;
+        int cache_len        = 0;
+        int n_conv           = 0;
+        int n_kv_cache_used  = 0;
+        int step             = 0;
+        int enc_out_offset   = 0;
+        int sched_mel_frames = 0;
+        parakeet_sched sched;
+    } stream;
 
     parakeet_lstm_state lstm_state;
 };
@@ -544,7 +592,22 @@ static inline int utf8_codepoint_len(unsigned char c) {
 }
 
 static bool is_sentencepiece_control(const std::string & piece) {
-    return piece == "<unk>" || piece == "<s>" || piece == "</s>" || piece == "[BLANK]";
+    if (piece == "<unk>" || piece == "<s>" || piece == "</s>" || piece == "[BLANK]") {
+        return true;
+    }
+    // Filter angle-bracket user-defined symbols (language tags like <en-US>, control
+    // tokens like <EOU>, <EOB>). Hex byte literals like <0x3E> are NOT filtered —
+    // they match exactly: '<', '0', 'x', two hex digits, '>'.
+    if (piece.size() >= 3 && piece.front() == '<' && piece.back() == '>') {
+        const auto inner = piece.substr(1, piece.size() - 2);
+        // Allow byte literals: "0x" followed by exactly 2 hex digits.
+        if (inner.size() == 4 && inner[0] == '0' && inner[1] == 'x' &&
+            std::isxdigit((unsigned char)inner[2]) && std::isxdigit((unsigned char)inner[3])) {
+            return false;
+        }
+        return true;  // language tag or other control symbol
+    }
+    return false;
 }
 
 static std::string sentencepiece_normalize(const std::string & text) {
@@ -790,6 +853,79 @@ static bool parakeet_enc_state_init(
     return true;
 }
 
+static bool parakeet_stream_cache_init(
+               struct parakeet_state & pstate,
+                      ggml_backend_t   backend,
+                                 int   n_layer,
+                                 int   n_state,
+                                 int   cache_len,
+                                 int   n_conv) {
+    auto & stream = pstate.stream;
+
+    if (stream.buffer != nullptr &&
+        stream.cache_len == cache_len &&
+        stream.n_conv == n_conv &&
+        (int) stream.kv_cache.size() == n_layer &&
+        (int) stream.conv_cache.size() == n_layer) {
+        ggml_backend_buffer_clear(stream.buffer, 0);
+        return true;
+    }
+
+    ggml_backend_buffer_free(stream.buffer);
+    stream.buffer = nullptr;
+    stream.ctx_buf.clear();
+    stream.kv_cache.clear();
+    stream.kv_cache_next.clear();
+    stream.conv_cache.clear();
+    stream.conv_cache_next.clear();
+    stream.cache_len = 0;
+    stream.n_conv = 0;
+
+    stream.ctx_buf.resize(ggml_tensor_overhead() * n_layer * 4);
+    stream.kv_cache.resize(n_layer);
+    stream.kv_cache_next.resize(n_layer);
+    stream.conv_cache.resize(n_layer);
+    stream.conv_cache_next.resize(n_layer);
+
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ stream.ctx_buf.size(),
+        /*.mem_buffer =*/ stream.ctx_buf.data(),
+        /*.no_alloc   =*/ true,
+    };
+
+    struct ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        PARAKEET_LOG_ERROR("%s: failed to allocate memory for streaming cache tensor context\n", __func__);
+        return false;
+    }
+
+    for (int il = 0; il < n_layer; ++il) {
+        stream.kv_cache[il] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_state, cache_len);
+        stream.kv_cache_next[il] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_state, cache_len);
+        stream.conv_cache[il] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_state, n_conv);
+        stream.conv_cache_next[il] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_state, n_conv);
+    }
+
+    stream.buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!stream.buffer) {
+        PARAKEET_LOG_ERROR("%s: failed to allocate memory for streaming caches\n", __func__);
+        ggml_free(ctx);
+        stream.kv_cache.clear();
+        stream.kv_cache_next.clear();
+        stream.conv_cache.clear();
+        stream.conv_cache_next.clear();
+        stream.ctx_buf.clear();
+        return false;
+    }
+
+    stream.cache_len = cache_len;
+    stream.n_conv = n_conv;
+    ggml_backend_buffer_clear(stream.buffer, 0);
+    ggml_free(ctx);
+
+    return true;
+}
+
 static ggml_backend_t parakeet_backend_init_gpu(const parakeet_context_params & params) {
     ggml_log_set(g_state.log_callback, g_state.log_callback_user_data);
 
@@ -1018,8 +1154,67 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
         read_safe(loader, hparams.n_pred_layers);
         read_safe(loader, hparams.n_tdt_durations);
         read_safe(loader, hparams.n_max_tokens);
+        read_safe(loader, hparams.n_pre_enc_features);
+        read_safe(loader, hparams.n_lang_slots);
 
-        hparams.arch = PARAKEET_ARCH_TDT;
+        uint32_t normalize = 0;
+        read_safe(loader, normalize);
+        if (normalize > 1) {
+            PARAKEET_LOG_ERROR("%s: unsupported mel_normalize value %u\n", __func__, normalize);
+            return false;
+        }
+        hparams.mel_normalize = (normalize != 0);
+
+        read_safe(loader, hparams.n_last_channel_cache);
+
+        int32_t n_attn_context_sizes = 0;
+        read_safe(loader, n_attn_context_sizes);
+        if (n_attn_context_sizes < 0) {
+            PARAKEET_LOG_ERROR("%s: invalid attn_context_sizes count %d\n", __func__, n_attn_context_sizes);
+            return false;
+        }
+        hparams.attn_context_sizes.resize(n_attn_context_sizes);
+        for (int32_t i = 0; i < n_attn_context_sizes; ++i) {
+            read_safe(loader, hparams.attn_context_sizes[i].first);
+            read_safe(loader, hparams.attn_context_sizes[i].second);
+        }
+
+        int32_t n_prompt_dict = 0;
+        read_safe(loader, n_prompt_dict);
+        if (n_prompt_dict < 0) {
+            PARAKEET_LOG_ERROR("%s: invalid prompt_dictionary count %d\n", __func__, n_prompt_dict);
+            return false;
+        }
+        model.prompt_dict.clear();
+        std::vector<char> tmp_prompt;
+        for (int32_t i = 0; i < n_prompt_dict; ++i) {
+            uint32_t len = 0;
+            int32_t idx = 0;
+            read_safe(loader, len);
+            tmp_prompt.resize(len);
+            if (len > 0) {
+                loader->read(loader->context, tmp_prompt.data(), len);
+            }
+            read_safe(loader, idx);
+            if (idx < 0 || idx >= hparams.n_lang_slots) {
+                PARAKEET_LOG_ERROR("%s: invalid prompt_dictionary index %d (expected 0..%d)\n", __func__, idx, hparams.n_lang_slots - 1);
+                return false;
+            }
+            std::string tag;
+            if (len > 0) {
+                tag.assign(tmp_prompt.data(), len);
+            }
+            model.prompt_dict[tag] = idx;
+        }
+
+        if (hparams.n_tdt_durations > 0) {
+            hparams.arch = PARAKEET_ARCH_TDT;
+        } else if (hparams.n_lang_slots > 0) {
+            hparams.arch = PARAKEET_ARCH_STREAMING;
+        } else {
+            PARAKEET_LOG_ERROR("%s: This NeMo model is not supported yet\n", __func__);
+            return false;
+        }
         wctx.model.hparams = hparams;
 
         const int32_t qntvr = hparams.ftype / GGML_QNT_VERSION_FACTOR;
@@ -1034,7 +1229,9 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
             return false;
         }
 
-        const char* arch_name = hparams.arch == PARAKEET_ARCH_TDT ? "Parakeet TDT" : "unknown";
+        const char* arch_name =
+            hparams.arch == PARAKEET_ARCH_TDT       ? "Parakeet TDT" :
+            hparams.arch == PARAKEET_ARCH_STREAMING ? "Parakeet RNNT Streaming" : "unknown";
         PARAKEET_LOG_INFO("%s: arch                   = %s\n", __func__, arch_name);
         PARAKEET_LOG_INFO("%s: n_vocab                = %d\n", __func__, hparams.n_vocab);
         PARAKEET_LOG_INFO("%s: n_audio_ctx            = %d\n", __func__, hparams.n_audio_ctx);
@@ -1053,6 +1250,31 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
         PARAKEET_LOG_INFO("%s: n_pred_layers          = %d\n", __func__, hparams.n_pred_layers);
         PARAKEET_LOG_INFO("%s: n_tdt_durations        = %d\n", __func__, hparams.n_tdt_durations);
         PARAKEET_LOG_INFO("%s: n_max_tokens           = %d\n", __func__, hparams.n_max_tokens);
+        PARAKEET_LOG_INFO("%s: n_pre_enc_features     = %d\n", __func__, hparams.n_pre_enc_features);
+        PARAKEET_LOG_INFO("%s: n_lang_slots           = %d\n", __func__, hparams.n_lang_slots);
+        PARAKEET_LOG_INFO("%s: n_prompt_dict          = %zu\n", __func__, model.prompt_dict.size());
+        PARAKEET_LOG_INFO("%s: mel_normalize          = %d\n", __func__, hparams.mel_normalize);
+        PARAKEET_LOG_INFO("%s: n_last_channel_cache   = %d\n", __func__, hparams.n_last_channel_cache);
+        if (!hparams.attn_context_sizes.empty()) {
+            std::string contexts;
+            for (size_t i = 0; i < hparams.attn_context_sizes.size(); ++i) {
+                const auto & att_ctx = hparams.attn_context_sizes[i];
+                if (!contexts.empty()) {
+                    contexts += ", ";
+                }
+                contexts += format("[%d, %d]", att_ctx.first, att_ctx.second);
+            }
+            PARAKEET_LOG_INFO("%s: attn_context_sizes   = %s\n", __func__, contexts.c_str());
+        }
+    }
+
+    if (hparams.arch == PARAKEET_ARCH_STREAMING && hparams.attn_context_sizes.empty()) {
+        PARAKEET_LOG_ERROR("%s: streaming model is missing attn_context_sizes metadata\n", __func__);
+        return false;
+    }
+    if (hparams.arch == PARAKEET_ARCH_STREAMING && model.prompt_dict.empty()) {
+        PARAKEET_LOG_ERROR("%s: streaming model is missing prompt_dictionary metadata\n", __func__);
+        return false;
     }
 
     // load mel filters
@@ -1124,6 +1346,9 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
             vocab.id_to_token[i] = word;
             vocab.max_token_length = std::max(vocab.max_token_length, word.size());
         }
+        PARAKEET_LOG_INFO("%s: tokenizer format: SentencePiece (token[0]='%s')\n", __func__,
+                          vocab.id_to_token.count(0) ? vocab.id_to_token[0].c_str() : "?");
+
         // Blank token for transducer is at index n_vocab (8192), outside the vocabulary
         int blank_id = n_vocab;
         vocab.token_blank = blank_id;
@@ -1165,8 +1390,17 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
 
     const int n_audio_layer = hparams.n_audio_layer;
 
-    // Calculate tensor count: pre_encode (12) + encoder layers (29 per layer) + prediction (9) + joint (6)
-    size_t n_tensors = 12 + (29 * n_audio_layer) + 9 + 6;
+    size_t n_tensors;
+    if (hparams.arch == PARAKEET_ARCH_TDT) {
+        // pre_encode(12) + per_layer(29: 26 common + 3 BatchNorm running stats) + prediction(7) + joint(6)
+        n_tensors = 12 + (29 * n_audio_layer) + 7 + 6;
+    } else if (hparams.arch == PARAKEET_ARCH_STREAMING) {
+        // pre_encode(12) + per_layer(26: LayerNorm, no running stats) + prediction(7) + joint(6) + lang_kernel(4)
+        n_tensors = 12 + (26 * n_audio_layer) + 7 + 6 + 4;
+    } else {
+        // RNNT: pre_encode(12) + per_layer(26: LayerNorm, no running stats) + prediction(7) + joint(6)
+        n_tensors = 12 + (26 * n_audio_layer) + 7 + 6;
+    }
 
     std::map<ggml_backend_buffer_type_t, ggml_context *> ctx_map;
     auto get_ctx = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
@@ -1234,7 +1468,7 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
 
     // Encoder pre_encode
     const int n_subsampling_channels = hparams.n_subsampling_channels;
-    const int n_pre_enc_features     = (hparams.n_mels / hparams.subsampling_factor) * n_subsampling_channels;
+    const int n_pre_enc_features     = hparams.n_pre_enc_features;
     model.enc_pre_out_w = create_tensor(PARAKEET_TENSOR_ENC_PRE_OUT_WEIGHT, ggml_new_tensor_2d(ctx, wtype, n_pre_enc_features, n_audio_state));
     ggml_set_name(model.enc_pre_out_w, "enc_pre_out_w");
     model.enc_pre_out_b = create_tensor(PARAKEET_TENSOR_ENC_PRE_OUT_BIAS, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_audio_state));
@@ -1290,10 +1524,12 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
         ggml_format_name(layer.conv_bn_w, "enc_%d_conv_bn_w", i);
         layer.conv_bn_b           = create_tensor(PARAKEET_TENSOR_ENC_CONV_BN_BIAS, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_audio_state), i);
         ggml_format_name(layer.conv_bn_b, "enc_%d_conv_bn_b", i);
-        layer.conv_bn_mean        = create_tensor(PARAKEET_TENSOR_ENC_CONV_BN_MEAN, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_audio_state), i);
-        layer.conv_bn_var         = create_tensor(PARAKEET_TENSOR_ENC_CONV_BN_VAR, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_audio_state), i);
-        ggml_format_name(layer.conv_bn_var, "enc_%d_conv_bn_var", i);
-        layer.conv_bn_num_batches = create_tensor(PARAKEET_TENSOR_ENC_CONV_BN_NUM_BATCHES, ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1), i);
+        if (hparams.arch == PARAKEET_ARCH_TDT) {
+            layer.conv_bn_mean        = create_tensor(PARAKEET_TENSOR_ENC_CONV_BN_MEAN, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_audio_state), i);
+            layer.conv_bn_var         = create_tensor(PARAKEET_TENSOR_ENC_CONV_BN_VAR, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_audio_state), i);
+            ggml_format_name(layer.conv_bn_var, "enc_%d_conv_bn_var", i);
+            layer.conv_bn_num_batches = create_tensor(PARAKEET_TENSOR_ENC_CONV_BN_NUM_BATCHES, ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1), i);
+        }
         layer.conv_pw2_w          = create_tensor(PARAKEET_TENSOR_ENC_CONV_PW2_WEIGHT, ggml_new_tensor_2d(ctx, wtype, n_audio_state, n_audio_state), i);
         ggml_format_name(layer.conv_pw2_w, "enc_%d_conv_pw2_w", i);
 
@@ -1360,6 +1596,22 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
     model.joint.net_b  = create_tensor(PARAKEET_TENSOR_JOINT_NET_BIAS, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_joint_out));
     ggml_set_name(model.joint.net_b, "net_b");
 
+    // Language conditioning MLP (streaming models only)
+    if (hparams.arch == PARAKEET_ARCH_STREAMING) {
+        const int n_lang_slots   = hparams.n_lang_slots;
+        const int n_lang_hidden  = 2 * n_audio_state;  // 2048 for 1024-dim encoder
+        const int n_lang_in      = n_audio_state + n_lang_slots;
+
+        model.lang_kernel_0_w = create_tensor(PARAKEET_TENSOR_LANG_KERNEL_0_WEIGHT, ggml_new_tensor_2d(ctx, wtype, n_lang_in, n_lang_hidden));
+        ggml_set_name(model.lang_kernel_0_w, "lang_kernel_0_w");
+        model.lang_kernel_0_b = create_tensor(PARAKEET_TENSOR_LANG_KERNEL_0_BIAS, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_lang_hidden));
+        ggml_set_name(model.lang_kernel_0_b, "lang_kernel_0_b");
+        model.lang_kernel_2_w = create_tensor(PARAKEET_TENSOR_LANG_KERNEL_2_WEIGHT, ggml_new_tensor_2d(ctx, wtype, n_lang_hidden, n_audio_state));
+        ggml_set_name(model.lang_kernel_2_w, "lang_kernel_2_w");
+        model.lang_kernel_2_b = create_tensor(PARAKEET_TENSOR_LANG_KERNEL_2_BIAS, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_audio_state));
+        ggml_set_name(model.lang_kernel_2_b, "lang_kernel_2_b");
+    }
+
     ggml_free(ctx);
 
     // allocate tensors in the backend buffers
@@ -1386,7 +1638,7 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
 
         std::vector<char> read_buf;
 
-        while (true) {
+        while (n_loaded < (int) tensors_map.size()) {
             int32_t n_dims;
             int32_t length;
             int32_t ttype;
@@ -1394,10 +1646,6 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
             read_safe(loader, n_dims);
             read_safe(loader, length);
             read_safe(loader, ttype);
-
-            if (loader->eof(loader->context)) {
-                break;
-            }
 
             int32_t nelements = 1;
             int32_t ne[4] = { 1, 1, 1, 1 };
@@ -2068,7 +2316,7 @@ static bool parakeet_ensure_encode_sched(
     pstate.n_audio_ctx = n_audio_ctx;
 
     const int subsampl_factor = pctx.model.hparams.subsampling_factor;
-    const int n_frames_max = (n_audio_ctx + subsampl_factor - 1) / subsampl_factor;
+    const int n_frames_max    = (n_audio_ctx + subsampl_factor - 1) / subsampl_factor;
     if (n_frames_max > pstate.enc_out->ne[1]) {
         ggml_backend_buffer_free(pstate.enc_out_buffer);
         pstate.enc_out_buffer = nullptr;
@@ -2247,10 +2495,15 @@ static struct ggml_cgraph * parakeet_build_graph_joint(
     struct ggml_tensor * enc  = ggml_mul_mat(ctx0, model.joint.enc_w, enc_out);
     enc = ggml_add(ctx0, enc, model.joint.enc_b);
     ggml_set_name(enc, "enc");
+    ggml_set_output(enc);
 
-    struct ggml_tensor * joint = ggml_add(ctx0, enc, pred);
+    struct ggml_tensor * joint_pre = ggml_add(ctx0, enc, pred);
+    ggml_set_output(joint_pre);
+    ggml_set_name(joint_pre, "joint_pre");
+
+    struct ggml_tensor * joint = ggml_relu(ctx0, joint_pre);
     ggml_set_name(joint, "joint");
-    joint = ggml_relu(ctx0, joint);
+    ggml_set_output(joint);
 
     struct ggml_tensor * logits = ggml_mul_mat(ctx0, model.joint.net_w, joint);
     logits = ggml_add(ctx0, logits, model.joint.net_b);
@@ -2518,19 +2771,24 @@ static bool parakeet_decode(
             }
         }
 
-        // find the max index of the duration logits, and look up that index
-        // value in the tdt_durations array to get the actual duration value.
         int best_duration_idx = 0;
-        float best_duration_logit = -1e10f;
-        for (int i = 0; i < n_tdt_durations; ++i) {
-            if (pstate.logits[n_vocab_logits + i] > best_duration_logit) {
-                best_duration_logit = pstate.logits[n_vocab_logits + i];
-                best_duration_idx = i;
+        int duration = 0;
+
+        if (n_tdt_durations > 0) {
+            // TDT: pick the duration with the highest logit and look up its frame count.
+            float best_duration_logit = -1e10f;
+            for (int i = 0; i < n_tdt_durations; ++i) {
+                if (pstate.logits[n_vocab_logits + i] > best_duration_logit) {
+                    best_duration_logit = pstate.logits[n_vocab_logits + i];
+                    best_duration_idx = i;
+                }
             }
+            duration = tdt_durations[best_duration_idx];
+        } else {
+            // RNNT: blank always advances 1 frame; non-blank stays on the same frame.
+            duration = (best_token == blank_id) ? 1 : 0;
         }
-        // look up that max duration index value in the tdt_durations array to
-        // get the actual duration value.
-        int duration = tdt_durations[best_duration_idx];
+
 
         if (best_token == blank_id) {
             if (duration == 0) {
@@ -2755,6 +3013,7 @@ static bool log_mel_spectrogram(
                        const int   n_threads,
           const parakeet_filters & filters,
                       const bool   debug,
+                      const bool   normalize,
                     parakeet_mel & mel,
         const parakeet_mel_cache & cache) {
     const int64_t t_start_us = ggml_time_us();
@@ -2812,32 +3071,29 @@ static bool log_mel_spectrogram(
         }
     }
 
-    {
+    if (normalize) {
         const double eps = 1e-5;
-        int valid_frames = n_samples / frame_step;
+        const int valid_frames = n_samples / frame_step;
 
-        for (int j = 0; j < mel.n_mel; j++) {
+        for (int j = 0; j < mel.n_mel; ++j) {
             double sum = 0.0;
             double sq_diff_sum = 0.0;
 
-            // Calculate Mean ONLY on valid audio frames
-            for (int i = 0; i < valid_frames; i++) {
-                sum += (double)mel.data[i * mel.n_mel + j];
+            for (int i = 0; i < valid_frames; ++i) {
+                sum += (double) mel.data[i * mel.n_mel + j];
             }
-            double mean = sum / valid_frames;
+            const double mean = sum / valid_frames;
 
-            // Calculate Variance ONLY on valid audio frames
-            for (int i = 0; i < valid_frames; i++) {
-                double diff = (double)mel.data[i * mel.n_mel + j] - mean;
+            for (int i = 0; i < valid_frames; ++i) {
+                const double diff = (double) mel.data[i * mel.n_mel + j] - mean;
                 sq_diff_sum += diff * diff;
             }
 
-            double std_dev = std::sqrt(sq_diff_sum / (valid_frames - 1.0));
-            double denominator = std_dev + eps;
+            const double std_dev = std::sqrt(sq_diff_sum / (valid_frames - 1.0));
+            const double denominator = std_dev + eps;
 
-            // Apply to ALL frames (including the padded ones)
-            for (int i = 0; i < mel.n_len; i++) {
-                mel.data[i * mel.n_mel + j] = (float)((mel.data[i * mel.n_mel + j] - mean) / denominator);
+            for (int i = 0; i < mel.n_len; ++i) {
+                mel.data[i * mel.n_mel + j] = (float) ((mel.data[i * mel.n_mel + j] - mean) / denominator);
             }
         }
     }
@@ -2912,9 +3168,9 @@ struct parakeet_state * parakeet_init_state(parakeet_context * ctx) {
     state->batch = parakeet_batch_init(batch_size);
 
     {
-        const int n_audio_state    = ctx->model.hparams.n_audio_state;
-        const int subsampl_factor  = ctx->model.hparams.subsampling_factor;
-        const int n_frames_max     = (batch_size + subsampl_factor - 1) / subsampl_factor;
+        const int n_audio_state = ctx->model.hparams.n_audio_state;
+        const int subsampl_factor = ctx->model.hparams.subsampling_factor;
+        const int n_frames_max  = (batch_size + subsampl_factor - 1) / subsampl_factor;
 
         if (!parakeet_enc_state_init(*state, state->backends[0], n_audio_state, n_frames_max)) {
             PARAKEET_LOG_ERROR("%s: parakeet_enc_state_init() failed\n", __func__);
@@ -2928,18 +3184,21 @@ struct parakeet_state * parakeet_init_state(parakeet_context * ctx) {
                 mem_enc_ctx / 1024.0 / 1024.0, mem_enc_out_buf / 1024.0 / 1024.0);
     }
 
-    // conv/encoder allocator
-    bool ok = parakeet_sched_graph_init(state->sched_encode, state->backends,
-            [&]() {
-                return parakeet_build_graph_encode(*ctx, *state);
-            });
+    // Offline encoder scheduler. Streaming models use their own lazy scheduler
+    // (stream.sched) set up in parakeet_ensure_stream_sched; skip this for them.
+    if (ctx->model.hparams.arch != PARAKEET_ARCH_STREAMING) {
+        bool ok = parakeet_sched_graph_init(state->sched_encode, state->backends,
+                [&]() {
+                    return parakeet_build_graph_encode(*ctx, *state);
+                });
 
-    if (!ok) {
-        PARAKEET_LOG_ERROR("%s: failed to init encode allocator\n", __func__);
-        parakeet_free_state(state);
-        return nullptr;
+        if (!ok) {
+            PARAKEET_LOG_ERROR("%s: failed to init encode allocator\n", __func__);
+            parakeet_free_state(state);
+            return nullptr;
+        }
+        state->sched_encode_n_audio_ctx = state->n_audio_ctx > 0 ? state->n_audio_ctx : ctx->model.hparams.n_audio_ctx;
     }
-    state->sched_encode_n_audio_ctx = state->n_audio_ctx > 0 ? state->n_audio_ctx : ctx->model.hparams.n_audio_ctx;
 
     if (!parakeet_lstm_state_init(*state, state->backends[0], ctx->model.hparams.n_pred_layers, ctx->model.hparams.n_pred_dim)) {
         PARAKEET_LOG_ERROR("%s: parakeet_lstm_states_init () failed\n", __func__);
@@ -2967,7 +3226,9 @@ struct parakeet_state * parakeet_init_state(parakeet_context * ctx) {
                 mem_pred_ctx / 1024.0 / 1024.0, mem_pred_out_buf / 1024.0 / 1024.0);
     }
 
-    PARAKEET_LOG_INFO("%s: compute buffer (encode) = %7.2f MB\n", __func__, parakeet_sched_size(state->sched_encode) / 1e6);
+    if (ctx->model.hparams.arch != PARAKEET_ARCH_STREAMING) {
+        PARAKEET_LOG_INFO("%s: compute buffer (encode) = %7.2f MB\n", __func__, parakeet_sched_size(state->sched_encode) / 1e6);
+    }
 
     {
         bool ok = parakeet_sched_graph_init(state->sched_decode, state->backends,
@@ -3167,6 +3428,7 @@ void parakeet_free_state(struct parakeet_state * state) {
         ggml_backend_buffer_free(state->lstm_state.buffer);
         ggml_backend_buffer_free(state->pred_out_buffer);
         ggml_backend_buffer_free(state->enc_out_buffer);
+        ggml_backend_buffer_free(state->stream.buffer);
 
         parakeet_batch_free(state->batch);
 
@@ -3220,6 +3482,7 @@ int parakeet_pcm_to_mel_with_state(struct parakeet_context * ctx, struct parakee
                 n_threads,
                 ctx->model.filters,
                 false,                        // debug
+                ctx->model.hparams.mel_normalize,
                 state->mel,
                 ctx->mel_cache)) {
         PARAKEET_LOG_ERROR("%s: failed to compute mel spectrogram\n", __func__);
@@ -3489,6 +3752,7 @@ struct parakeet_full_params parakeet_full_default_params(enum parakeet_sampling_
         /*.duration_ms                      =*/ 0,
         /*.no_context                       =*/ true,
         /*.audio_ctx                        =*/ 0,
+        /*.lang_tag                         =*/ nullptr,
         /*.new_token_callback               =*/ nullptr,
         /*.new_token_callback_user_data     =*/ nullptr,
         /*.new_segment_callback             =*/ nullptr,
@@ -3504,6 +3768,582 @@ struct parakeet_full_params parakeet_full_default_params(enum parakeet_sampling_
     return result;
 }
 
+// Compute the subsampled length after 3 causal stride-2 conv stages: n -> n//2+1 each.
+static int parakeet_stream_subsample(int n) {
+    for (int i = 0; i < 3; i++) {
+        n = n / 2 + 1;
+    }
+    return n;
+}
+
+// Fill pos_emb [n_state * pos_len] with NeMo RelPosAttention embeddings.
+// Positions run from +(Pn-1) down to -(Pn-1) (length = 2*Pn-1).
+static void parakeet_stream_fill_pos_emb(std::vector<float> & pe, int Pn, int n_state) {
+    const int pos_len = 2 * Pn - 1;
+    const int d_half  = n_state / 2;
+    const float log10k = logf(10000.0f);
+    pe.resize((size_t)n_state * pos_len);
+    for (int t = 0; t < pos_len; ++t) {
+        float pos = float(Pn - 1 - t);
+        for (int k = 0; k < d_half; ++k) {
+            float freq  = expf(-(float(k * 2) * log10k / float(n_state)));
+            float theta = freq * pos;
+            // Interleaved format: even dims=sin, odd dims=cos (matches NeMo RelPositionalEncoding)
+            pe[(size_t)t * n_state + 2*k]     = sinf(theta);
+            pe[(size_t)t * n_state + 2*k + 1] = cosf(theta);
+        }
+    }
+}
+
+
+static struct ggml_cgraph * parakeet_build_graph_stream_chunk(
+        parakeet_context & pctx,
+        parakeet_state   & pstate,
+        int                n_mel_frames,
+        int                n_drop,
+        int                n_frames,
+        int                cache_len,
+        int                n_kv_cache_used) {
+
+    GGML_UNUSED(n_kv_cache_used);
+    const auto & model   = pctx.model;
+    const auto & hparams = model.hparams;
+
+    const int n_mels  = hparams.n_mels;
+    const int n_state = hparams.n_audio_state;
+    const int n_layer = hparams.n_audio_layer;
+    const int n_head  = hparams.n_audio_head;
+    const int d_head  = n_state / n_head;
+
+    const int n_conv  = hparams.n_conv_kernel - 1;  // conv cache depth = kernel-1
+    const int n_attn  = n_frames + cache_len;       // attention key length
+    const int pos_len = 2 * n_attn - 1;
+
+    const float fc_factor = 0.5f;
+
+    struct ggml_init_params params = {
+        pstate.stream.sched.meta.size(),
+        pstate.stream.sched.meta.data(),
+        true,
+    };
+    struct ggml_context * ctx0 = ggml_init(params);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, PARAKEET_MAX_NODES, false);
+
+    struct ggml_tensor * mel = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, n_mels, n_mel_frames, 1, 1);
+    ggml_set_name(mel, "mel");
+    ggml_set_input(mel);
+
+    // We manually pad the mel input to use asymmetric padding.
+    // TODO: add motivation for this or link to notes.
+    struct ggml_tensor * inp = ggml_pad_ext(ctx0, mel, 2, 1, 2, 1, 0, 0, 0, 0);
+    // No padding.
+    struct ggml_tensor * cur = ggml_conv_2d(ctx0, model.enc_pre_conv_0_w, inp, 2, 2, 0, 0, 1, 1);
+    cur = ggml_add(ctx0, cur, model.enc_pre_conv_0_b);
+    cur = ggml_relu(ctx0, cur);
+
+    cur = ggml_pad_ext(ctx0, cur, 2, 1, 2, 1, 0, 0, 0, 0);
+    cur = ggml_conv_2d_dw_direct(ctx0, model.enc_pre_conv_2_w, cur, 2, 2, 0, 0, 1, 1);
+    cur = ggml_add(ctx0, cur, model.enc_pre_conv_2_b);
+
+    cur = ggml_conv_2d(ctx0, model.enc_pre_conv_3_w, cur, 1, 1, 0, 0, 1, 1);
+    cur = ggml_add(ctx0, cur, model.enc_pre_conv_3_b);
+    cur = ggml_relu(ctx0, cur);
+
+    cur = ggml_pad_ext(ctx0, cur, 2, 1, 2, 1, 0, 0, 0, 0);
+    cur = ggml_conv_2d_dw_direct(ctx0, model.enc_pre_conv_5_w, cur, 2, 2, 0, 0, 1, 1);
+    cur = ggml_add(ctx0, cur, model.enc_pre_conv_5_b);
+
+    cur = ggml_conv_2d(ctx0, model.enc_pre_conv_6_w, cur, 1, 1, 0, 0, 1, 1);
+    cur = ggml_add(ctx0, cur, model.enc_pre_conv_6_b);
+    cur = ggml_relu(ctx0, cur);
+
+    cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+    cur = ggml_cont(ctx0, cur);
+
+    const int n_freq  = (int)cur->ne[0];
+    const int n_chan  = (int)cur->ne[1];
+    const int n_sub  = (int)cur->ne[2];
+
+    cur = ggml_reshape_2d(ctx0, cur, n_freq * n_chan, n_sub);
+    cur = ggml_mul_mat(ctx0, model.enc_pre_out_w, cur);
+    cur = ggml_add(ctx0, cur, model.enc_pre_out_b);
+
+    if (n_drop > 0) {
+        cur = ggml_view_2d(ctx0, cur, n_state, n_frames, cur->nb[1], (size_t)n_drop * cur->nb[1]);
+        cur = ggml_cont(ctx0, cur);
+    }
+
+    struct ggml_tensor * pos_emb = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_state, pos_len);
+    ggml_set_name(pos_emb, "pos_emb");
+    ggml_set_input(pos_emb);
+
+    struct ggml_tensor * attn_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_attn, n_frames);
+    ggml_set_name(attn_mask, "attn_mask");
+    ggml_set_input(attn_mask);
+
+
+    for (int il = 0; il < n_layer; ++il) {
+        const auto & layer = model.layers[il];
+
+        struct ggml_tensor * kv_in = pstate.stream.kv_cache[il];
+        struct ggml_tensor * cv_in = pstate.stream.conv_cache[il];
+
+        // FFN1
+        {
+            struct ggml_tensor * res = cur;
+            cur = ggml_norm(ctx0, cur, hparams.eps);
+            cur = ggml_add(ctx0, ggml_mul(ctx0, cur, layer.norm_ff1_w), layer.norm_ff1_b);
+            cur = ggml_mul_mat(ctx0, layer.ff1_linear1_w, cur);
+            cur = ggml_silu(ctx0, cur);
+            cur = ggml_mul_mat(ctx0, layer.ff1_linear2_w, cur);
+            cur = ggml_add(ctx0, res, ggml_scale(ctx0, cur, fc_factor));
+        }
+
+        // Self-attention
+        struct ggml_tensor * attn_in;
+        {
+            struct ggml_tensor * res = cur;
+            cur = ggml_norm(ctx0, cur, hparams.eps);
+            cur = ggml_add(ctx0, ggml_mul(ctx0, cur, layer.norm_attn_w), layer.norm_attn_b);
+            attn_in = cur;  // saved for KV cache update
+
+            struct ggml_tensor * kv_seq = ggml_concat(ctx0, kv_in, attn_in, 1);
+
+            struct ggml_tensor * Q  = ggml_mul_mat(ctx0, layer.attn_q_w, attn_in);
+            struct ggml_tensor * K  = ggml_mul_mat(ctx0, layer.attn_k_w, kv_seq);
+            struct ggml_tensor * V  = ggml_mul_mat(ctx0, layer.attn_v_w, kv_seq);
+            struct ggml_tensor * Pp = ggml_mul_mat(ctx0, layer.attn_pos_w, pos_emb);
+
+            Q  = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, Q,  d_head, n_head, n_frames), 0, 2, 1, 3));
+            K  = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, K,  d_head, n_head, n_attn),   0, 2, 1, 3));
+            V  = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, V,  d_head, n_head, n_attn),   0, 2, 1, 3));
+            Pp = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, Pp, d_head, n_head, pos_len), 0, 2, 1, 3));
+
+            struct ggml_tensor * bu = ggml_reshape_3d(ctx0, layer.attn_pos_bias_u, d_head, 1, n_head);
+            struct ggml_tensor * bv = ggml_reshape_3d(ctx0, layer.attn_pos_bias_v, d_head, 1, n_head);
+            struct ggml_tensor * qu = ggml_add(ctx0, Q, bu);
+            struct ggml_tensor * qv = ggml_add(ctx0, Q, bv);
+
+            struct ggml_tensor * ac = ggml_mul_mat(ctx0, K, qu);
+
+            struct ggml_tensor * bd = ggml_mul_mat(ctx0, Pp, qv);
+
+            // Explicit Transformer-XL rel_shift for the streaming case where
+            // query length (n_frames) is smaller than key length (n_attn).
+            bd = ggml_pad_ext(ctx0, bd, 1, 0, 0, 0, 0, 0, 0, 0);
+            bd = ggml_reshape_3d(ctx0, bd, n_frames, pos_len + 1, n_head);
+            bd = ggml_view_3d(ctx0, bd, n_frames, pos_len, n_head,
+                              bd->nb[1], bd->nb[2], bd->nb[1]);
+            bd = ggml_cont(ctx0, bd);
+            bd = ggml_reshape_3d(ctx0, bd, pos_len, n_frames, n_head);
+            bd = ggml_view_3d(ctx0, bd, n_attn, n_frames, n_head,
+                              bd->nb[1], bd->nb[2], 0);
+            bd = ggml_cont(ctx0, bd);
+
+            struct ggml_tensor * scores = ggml_add(ctx0, ac, bd);
+            struct ggml_tensor * attn = ggml_soft_max_ext(ctx0, scores, attn_mask,
+                                                          1.0f / std::sqrt((float)d_head), 0.0f);
+
+            struct ggml_tensor * Vt = ggml_cont(ctx0, ggml_permute(ctx0, V, 1, 0, 2, 3));
+            cur = ggml_mul_mat(ctx0, Vt, attn);
+            cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3));
+            cur = ggml_reshape_2d(ctx0, cur, n_state, n_frames);
+            cur = ggml_mul_mat(ctx0, layer.attn_out_w, cur);
+            cur = ggml_add(ctx0, res, cur);
+        }
+
+        // KV cache update
+        {
+            const int keep = cache_len - n_frames;
+            struct ggml_tensor * next_kv;
+            if (keep > 0) {
+                struct ggml_tensor * tail = ggml_view_2d(ctx0, kv_in, n_state, keep,
+                                                         kv_in->nb[1], (size_t)n_frames * kv_in->nb[1]);
+                next_kv = ggml_cont(ctx0, ggml_concat(ctx0, tail, attn_in, 1));
+            } else {
+                next_kv = ggml_cont(ctx0, ggml_view_2d(ctx0, attn_in, n_state, cache_len,
+                                                        attn_in->nb[1], (size_t)(n_frames - cache_len) * attn_in->nb[1]));
+            }
+            ggml_build_forward_expand(gf, ggml_cpy(ctx0, next_kv, pstate.stream.kv_cache_next[il]));
+        }
+
+        // Convolution module
+        {
+            struct ggml_tensor * res = cur;
+            cur = ggml_norm(ctx0, cur, hparams.eps);
+            cur = ggml_add(ctx0, ggml_mul(ctx0, cur, layer.norm_conv_w), layer.norm_conv_b);
+            cur = ggml_mul_mat(ctx0, layer.conv_pw1_w, cur);
+
+            // GLU split
+            {
+                const int64_t d = cur->ne[0] / 2;
+                struct ggml_tensor * sig  = ggml_view_2d(ctx0, cur, d, cur->ne[1], cur->nb[1], 0);
+                struct ggml_tensor * gate = ggml_view_2d(ctx0, cur, d, cur->ne[1], cur->nb[1], (size_t)d * cur->nb[0]);
+                cur = ggml_mul(ctx0, sig, ggml_sigmoid(ctx0, gate));
+            }
+
+            struct ggml_tensor * dw_in = ggml_concat(ctx0, cv_in, cur, 1);
+
+            {
+                struct ggml_tensor * next_cv = ggml_cont(ctx0, ggml_view_2d(ctx0, dw_in, n_state, n_conv,
+                                                          dw_in->nb[1], (size_t)n_frames * dw_in->nb[1]));
+                ggml_build_forward_expand(gf, ggml_cpy(ctx0, next_cv, pstate.stream.conv_cache_next[il]));
+            }
+
+            cur = ggml_cont(ctx0, ggml_transpose(ctx0, dw_in));
+            cur = ggml_ssm_conv(ctx0, cur, layer.conv_dw_w);
+
+            // LayerNorm (streaming model uses LayerNorm as it does not normalize
+            // the log mel spectrogram.
+            cur = ggml_norm(ctx0, cur, hparams.eps);
+            cur = ggml_add(ctx0, ggml_mul(ctx0, cur, layer.conv_bn_w), layer.conv_bn_b);
+            cur = ggml_silu(ctx0, cur);
+            cur = ggml_mul_mat(ctx0, layer.conv_pw2_w, cur);
+            cur = ggml_add(ctx0, res, cur);
+        }
+
+        // FFN2
+        {
+            struct ggml_tensor * res = cur;
+            cur = ggml_norm(ctx0, cur, hparams.eps);
+            cur = ggml_add(ctx0, ggml_mul(ctx0, cur, layer.norm_ff2_w), layer.norm_ff2_b);
+            cur = ggml_mul_mat(ctx0, layer.ff2_linear1_w, cur);
+            cur = ggml_silu(ctx0, cur);
+            cur = ggml_mul_mat(ctx0, layer.ff2_linear2_w, cur);
+            cur = ggml_add(ctx0, res, ggml_scale(ctx0, cur, fc_factor));
+        }
+
+        // Output norm
+        cur = ggml_norm(ctx0, cur, hparams.eps);
+        cur = ggml_add(ctx0, ggml_mul(ctx0, cur, layer.norm_out_w), layer.norm_out_b);
+    }
+    // cur: [n_state, Tc]
+
+
+    const int out_off = pstate.stream.enc_out_offset;
+    struct ggml_tensor * out_view = ggml_view_2d(ctx0, pstate.enc_out, n_state, n_frames,
+                                                 pstate.enc_out->nb[1],
+                                                 (size_t)out_off * pstate.enc_out->nb[1]);
+    ggml_build_forward_expand(gf, ggml_cpy(ctx0, cur, out_view));
+
+
+    ggml_free(ctx0);
+    return gf;
+}
+
+// Ensure the streaming chunk scheduler is allocated for the given mel frame count.
+// Uses the larger main-chunk (41-frame = pre_cache+chunk_main) graph for memory pre-allocation.
+static bool parakeet_ensure_stream_sched(
+        parakeet_context & pctx,
+        parakeet_state   & pstate,
+        int                cache_len)
+{
+    const int n_mel    = 41;   // main chunk total mel frames (pre_cache=9 + chunk_main=32)
+    const int n_drop   = 2;
+    const int n_frames = parakeet_stream_subsample(n_mel) - n_drop;
+    const int rep_clc  = 0;
+
+    if (pstate.stream.sched.sched && pstate.stream.sched_mel_frames == n_mel) {
+        return true;
+    }
+
+    parakeet_sched_free(pstate.stream.sched);
+
+    // Temporarily set enc_out_offset=0 so the init graph writes to a valid enc_out slot
+    const int saved_off = pstate.stream.enc_out_offset;
+    pstate.stream.enc_out_offset = 0;
+
+    const bool ok = parakeet_sched_graph_init(pstate.stream.sched, pstate.backends,
+        [&]() {
+            return parakeet_build_graph_stream_chunk(pctx, pstate, n_mel, n_drop,
+                                                    n_frames, cache_len, rep_clc);
+        });
+
+    pstate.stream.enc_out_offset = saved_off;
+
+    if (!ok) return false;
+    pstate.stream.sched_mel_frames = n_mel;
+    return true;
+}
+
+// Compute one streaming chunk: build graph, fill inputs, and run it.
+static bool parakeet_stream_compute_chunk(
+        parakeet_context & pctx,
+        parakeet_state   & pstate,
+        int                mel_offset,
+        int                n_mel_frames,
+        int                drop,
+        int                n_enc_out,
+        int                cache_len,
+        int                n_threads)
+{
+    const auto & hparams = pctx.model.hparams;
+    const int n_state    = hparams.n_audio_state;
+    const int n_attn     = n_enc_out + cache_len;
+    const int Pn         = n_enc_out + cache_len;
+    const int n_kv_cache_used    = pstate.stream.n_kv_cache_used;
+
+    ggml_backend_sched_t sched = pstate.stream.sched.sched;
+
+    ggml_cgraph * gf = parakeet_build_graph_stream_chunk(pctx, pstate,
+                                                         n_mel_frames, drop, n_enc_out, cache_len, n_kv_cache_used);
+    if (!ggml_backend_sched_alloc_graph(sched, gf)) return false;
+
+    // Set mel input: copy n_mel_frames rows from pstate.mel starting at mel_offset
+    {
+        struct ggml_tensor * mel_t = ggml_graph_get_tensor(gf, "mel");
+        const auto & mel_inp = pstate.mel;
+        const int n_mels = hparams.n_mels;
+        pstate.inp_mel.resize((size_t)n_mels * n_mel_frames);
+        const int i0 = std::min(mel_offset, mel_inp.n_len);
+        const int i1 = std::min(mel_offset + n_mel_frames, mel_inp.n_len);
+        memset(pstate.inp_mel.data(), 0, pstate.inp_mel.size() * sizeof(float));
+        memcpy(pstate.inp_mel.data(),
+               mel_inp.data.data() + (size_t)i0 * n_mels,
+               (size_t)(i1 - i0) * n_mels * sizeof(float));
+        ggml_backend_tensor_set(mel_t, pstate.inp_mel.data(), 0, pstate.inp_mel.size() * sizeof(float));
+    }
+
+    {
+        struct ggml_tensor * pe_t = ggml_graph_get_tensor(gf, "pos_emb");
+        std::vector<float> pe;
+        parakeet_stream_fill_pos_emb(pe, Pn, n_state);
+        ggml_backend_tensor_set(pe_t, pe.data(), 0, pe.size() * sizeof(float));
+    }
+
+    {
+        struct ggml_tensor * mask_t = ggml_graph_get_tensor(gf, "attn_mask");
+        const auto & attn_ctx = hparams.attn_context_sizes.front();
+        const int attn_left   = attn_ctx.first;
+        const int attn_right  = attn_ctx.second;
+        const int chunk_sz   = attn_right + 1;
+        const int left_chunks = (chunk_sz > 0) ? attn_left / chunk_sz : 0;
+        const int empty_cache = cache_len - n_kv_cache_used;
+
+        std::vector<float> mask_data((size_t)n_attn * n_enc_out);
+        for (int qi = 0; qi < n_enc_out; ++qi) {
+            const int gq = cache_len + qi;
+            const int cq = gq / chunk_sz;
+            for (int kj = 0; kj < n_attn; ++kj) {
+                bool vis = (kj >= empty_cache);
+                if (vis) {
+                    const int gk = kj;
+                    const int ck = gk / chunk_sz;
+                    const int diff = cq - ck;
+                    vis = (diff >= 0 && diff <= left_chunks);
+                }
+                mask_data[(size_t)qi * n_attn + kj] = vis ? 0.0f : -INFINITY;
+            }
+        }
+        ggml_backend_tensor_set(mask_t, mask_data.data(), 0, mask_data.size() * sizeof(float));
+    }
+
+    if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+        return false;
+    }
+
+    std::swap(pstate.stream.kv_cache, pstate.stream.kv_cache_next);
+    std::swap(pstate.stream.conv_cache, pstate.stream.conv_cache_next);
+
+    return true;
+}
+
+static bool parakeet_stream_apply_lang_kernel(
+        parakeet_context & pctx,
+        parakeet_state   & pstate,
+        int                n_threads)
+{
+    GGML_UNUSED(n_threads);
+
+    const auto & model   = pctx.model;
+    const auto & hparams = model.hparams;
+    const int n_state    = hparams.n_audio_state;
+    const int n_lang     = hparams.n_lang_slots;
+    const int n_hidden   = 2 * n_state;
+    const int n_frames   = pstate.stream.enc_out_offset;
+    const int lang_idx   = pstate.lang_idx;
+
+    if (n_frames <= 0 || n_lang <= 0) {
+        return true;
+    }
+
+    auto tensor_to_f32 = [](struct ggml_tensor * tensor, std::vector<float> & out) -> bool {
+        const int64_t n = ggml_nelements(tensor);
+        out.resize((size_t) n);
+
+        switch (tensor->type) {
+            case GGML_TYPE_F32:
+                ggml_backend_tensor_get(tensor, out.data(), 0, (size_t) n * sizeof(float));
+                return true;
+            case GGML_TYPE_F16: {
+                std::vector<ggml_fp16_t> tmp((size_t) n);
+                ggml_backend_tensor_get(tensor, tmp.data(), 0, (size_t) n * sizeof(ggml_fp16_t));
+                ggml_fp16_to_fp32_row(tmp.data(), out.data(), n);
+                return true;
+            }
+            default:
+                PARAKEET_LOG_ERROR("%s: unsupported tensor type %d for host prompt kernel\n", __func__, tensor->type);
+                return false;
+        }
+    };
+
+    std::vector<float> enc_in;
+    std::vector<float> w0;
+    std::vector<float> b0;
+    std::vector<float> w2;
+    std::vector<float> b2;
+
+    if (!tensor_to_f32(pstate.enc_out, enc_in) ||
+        !tensor_to_f32(model.lang_kernel_0_w, w0) ||
+        !tensor_to_f32(model.lang_kernel_0_b, b0) ||
+        !tensor_to_f32(model.lang_kernel_2_w, w2) ||
+        !tensor_to_f32(model.lang_kernel_2_b, b2)) {
+        return false;
+    }
+
+    const int n_in = n_state + n_lang;
+    std::vector<float> base0((size_t) n_hidden);
+    for (int o = 0; o < n_hidden; ++o) {
+        float v = b0[o];
+        if (lang_idx >= 0 && lang_idx < n_lang) {
+            v += w0[(size_t) o * n_in + n_state + lang_idx];
+        }
+        base0[o] = v;
+    }
+
+    std::vector<float> hidden((size_t) n_hidden);
+    std::vector<float> enc_out((size_t) n_state * n_frames);
+
+    for (int t = 0; t < n_frames; ++t) {
+        const float * x = enc_in.data() + (size_t) t * n_state;
+        float * y = enc_out.data() + (size_t) t * n_state;
+
+        for (int o = 0; o < n_hidden; ++o) {
+            const float * wrow = w0.data() + (size_t) o * n_in;
+            float sum = base0[o];
+            for (int i = 0; i < n_state; ++i) {
+                sum += wrow[i] * x[i];
+            }
+            hidden[o] = sum > 0.0f ? sum : 0.0f;
+        }
+
+        for (int o = 0; o < n_state; ++o) {
+            const float * wrow = w2.data() + (size_t) o * n_hidden;
+            float sum = b2[o];
+            for (int i = 0; i < n_hidden; ++i) {
+                sum += wrow[i] * hidden[i];
+            }
+            y[o] = sum;
+        }
+    }
+
+    ggml_backend_tensor_set(pstate.enc_out, enc_out.data(), 0, enc_out.size() * sizeof(float));
+    return true;
+}
+
+// Run the full cache-based streaming encoder on pstate.mel.
+// Produces encoder output in pstate.enc_out and sets pstate.n_frames.
+static bool parakeet_stream_encode(
+        parakeet_context & pctx,
+        parakeet_state   & pstate,
+        int                n_threads,
+        ggml_abort_callback abort_callback,
+        void *             abort_callback_data)
+{
+    const auto & hparams  = pctx.model.hparams;
+    const int n_state     = hparams.n_audio_state;
+    const int n_layer     = hparams.n_audio_layer;
+    const int n_attn      = hparams.n_last_channel_cache;
+    const int n_conv      = hparams.n_conv_kernel - 1;
+
+    const int chunk_first = 25;  // first chunk mel frames
+    const int chunk_main  = 32;  // subsequent chunk mel frames
+    const int pre_cache   = 9;   // mel frames of left overlap
+    const int n_drop      = 2;   // subsampled frames to drop
+
+    const int n_mel_total = pstate.mel.n_len;
+    if (n_mel_total == 0) {
+        pstate.n_frames = 0;
+        return true;
+    }
+
+    const int n_chunks_max = 1 + std::max(0, (n_mel_total - chunk_first + chunk_main - 1) / chunk_main);
+    const int n_enc_max    = n_chunks_max * 4 + 8;
+
+    if (!pstate.enc_out || n_enc_max > (int)pstate.enc_out->ne[1]) {
+        if (pstate.enc_out_buffer) {
+            ggml_backend_buffer_free(pstate.enc_out_buffer);
+            pstate.enc_out_buffer = nullptr;
+            pstate.enc_out = nullptr;
+        }
+        if (!parakeet_enc_state_init(pstate, pstate.backends[0], n_state, n_enc_max)) {
+            PARAKEET_LOG_ERROR("%s: failed to allocate enc_out for %d frames\n", __func__, n_enc_max);
+            return false;
+        }
+    }
+
+    if (!parakeet_stream_cache_init(pstate, pstate.backends[0], n_layer, n_state, n_attn, n_conv)) {
+        PARAKEET_LOG_ERROR("%s: failed to allocate streaming caches\n", __func__);
+        return false;
+    }
+
+    pstate.stream.n_kv_cache_used = 0;
+    pstate.stream.step            = 0;
+    pstate.stream.enc_out_offset  = 0;
+
+    if (!parakeet_ensure_stream_sched(pctx, pstate, n_attn)) {
+        PARAKEET_LOG_ERROR("%s: failed to initialize streaming encoder scheduler\n", __func__);
+        return false;
+    }
+
+    int buf_idx = chunk_first;
+    bool is_first = true;
+
+    while (true) {
+        const int mel_offset = is_first ? 0 : std::max(0, buf_idx - pre_cache);
+        int mel_hi = is_first ? std::min(chunk_first, n_mel_total) : buf_idx + chunk_main;
+        const bool is_last = (mel_hi >= n_mel_total);
+        mel_hi = std::min(mel_hi, n_mel_total);
+        int n_mel_frames = mel_hi - mel_offset;
+
+        if (n_mel_frames > 0) {
+            const int n_sub    = parakeet_stream_subsample(n_mel_frames);
+            const int n_frames = std::max(0, n_sub - n_drop);
+
+            if (n_frames > 0) {
+                if (!parakeet_stream_compute_chunk(pctx, pstate, mel_offset, n_mel_frames,
+                                                  n_drop, n_frames, n_attn, n_threads)) {
+                    PARAKEET_LOG_ERROR("%s: streaming chunk compute failed\n", __func__);
+                    return false;
+                }
+
+                pstate.stream.n_kv_cache_used = std::min(n_attn, pstate.stream.n_kv_cache_used + n_frames);
+                pstate.stream.enc_out_offset += n_frames;
+                pstate.stream.step++;
+            }
+        }
+
+        if (is_last) {
+            break;
+        }
+        if (is_first) {
+            is_first = false;
+        } else {
+            buf_idx += chunk_main;
+        }
+    }
+
+    pstate.n_frames = pstate.stream.enc_out_offset;
+    if (!parakeet_stream_apply_lang_kernel(pctx, pstate, n_threads)) {
+        PARAKEET_LOG_ERROR("%s: failed to apply streaming prompt kernel\n", __func__);
+        return false;
+    }
+    PARAKEET_LOG_DEBUG("%s: streaming encode complete: %d chunks -> %d encoder frames\n",
+                       __func__, pstate.stream.step, pstate.n_frames);
+
+    return !(abort_callback && abort_callback(abort_callback_data));
+}
+
 static void parakeet_reset_state(struct parakeet_state * state) {
     state->decoded_tokens.clear();
     state->decoded_token_data.clear();
@@ -3512,6 +4352,30 @@ static void parakeet_reset_state(struct parakeet_state * state) {
         ggml_backend_buffer_clear(state->lstm_state.buffer, 0);
     }
 
+}
+
+static bool parakeet_set_stream_lang_idx(
+        const struct parakeet_context & ctx,
+              struct parakeet_state   & state,
+        const struct parakeet_full_params & params) {
+    const int n_lang = ctx.model.hparams.n_lang_slots;
+    int lang_idx = 0;
+    if (params.lang_tag != nullptr && params.lang_tag[0] != '\0') {
+        const auto it = ctx.model.prompt_dict.find(params.lang_tag);
+        if (it == ctx.model.prompt_dict.end()) {
+            PARAKEET_LOG_ERROR("%s: unknown lang_tag '%s'\n", __func__, params.lang_tag);
+            return false;
+        }
+        lang_idx = it->second;
+    }
+
+    if (lang_idx < 0 || lang_idx >= n_lang) {
+        PARAKEET_LOG_ERROR("%s: invalid lang_idx %d (expected 0..%d)\n", __func__, lang_idx, n_lang - 1);
+        return false;
+    }
+
+    state.lang_idx = lang_idx;
+    return true;
 }
 
 // Encode and decode the mel spectrogram already in state, without recomputing it.
@@ -3544,13 +4408,33 @@ int parakeet_full_with_state(
     const int n_mel_total = state->mel.n_len;
     const int n_audio_ctx = ctx->model.hparams.n_audio_ctx;
 
-    if (n_mel_total <= n_audio_ctx) {
+    if (ctx->model.hparams.arch == PARAKEET_ARCH_STREAMING) {
+        if (!parakeet_set_stream_lang_idx(*ctx, *state, params)) {
+            return -3;
+        }
+        if (params.progress_callback) {
+            params.progress_callback(ctx, state, 0, params.progress_callback_user_data);
+        }
+        if (params.encoder_begin_callback) {
+            if (!params.encoder_begin_callback(ctx, state, params.encoder_begin_callback_user_data)) {
+                PARAKEET_LOG_ERROR("%s: encoder_begin_callback returned false\n", __func__);
+                return -6;
+            }
+        }
+        if (!parakeet_stream_encode(*ctx, *state, params.n_threads,
+                                   params.abort_callback, params.abort_callback_user_data)) {
+            PARAKEET_LOG_ERROR("%s: streaming encode failed\n", __func__);
+            return -6;
+        }
+        if (params.progress_callback) {
+            params.progress_callback(ctx, state, 100, params.progress_callback_user_data);
+        }
+    } else if (n_mel_total <= n_audio_ctx) {
         if (params.progress_callback) {
             params.progress_callback(ctx, state, 0, params.progress_callback_user_data);
         }
         return parakeet_chunk_with_state(ctx, state, params);
-    }
-
+    } else {
     PARAKEET_LOG_DEBUG("%s: audio too long (%d mel > n_audio_ctx=%d), using dynamic encoder graph\n",
                        __func__, n_mel_total, n_audio_ctx);
 
@@ -3581,6 +4465,7 @@ int parakeet_full_with_state(
 
     if (params.progress_callback) {
         params.progress_callback(ctx, state, 100, params.progress_callback_user_data);
+    }
     }
 
     const size_t tokens_before = state->decoded_tokens.size();
@@ -3652,31 +4537,48 @@ int parakeet_chunk(
         }
     }
 
-    if (params.audio_ctx == 0) {
-        const int total_len = parakeet_n_len_from_state(state);
-        const int model_max_ctx = parakeet_n_audio_ctx(ctx);
-        params.audio_ctx = std::min(total_len, model_max_ctx);
-        PARAKEET_LOG_DEBUG("Processing audio: total_frames=%d, chunk_size=%d\n", total_len, params.audio_ctx);
-    }
-    state->n_audio_ctx = params.audio_ctx;
-
-    const int n_frames = parakeet_n_len_from_state(state);
-
-    if (!parakeet_ensure_encode_sched(*ctx, *state, state->n_audio_ctx)) {
-        PARAKEET_LOG_ERROR("%s: failed to allocate encoder graph for %d mel frames\n",
-                __func__, state->n_audio_ctx);
-        return -6;
-    }
-
-    if (params.encoder_begin_callback) {
-        if (!params.encoder_begin_callback(ctx, state, params.encoder_begin_callback_user_data)) {
-            PARAKEET_LOG_ERROR("%s: encoder_begin_callback returned false - aborting\n", __func__);
+    // Streaming model: use cache-based chunked encoder (bypasses offline sched)
+    if (ctx->model.hparams.arch == PARAKEET_ARCH_STREAMING) {
+        if (!parakeet_set_stream_lang_idx(*ctx, *state, params)) {
+            return -3;
+        }
+        if (params.encoder_begin_callback) {
+            if (!params.encoder_begin_callback(ctx, state, params.encoder_begin_callback_user_data)) {
+                PARAKEET_LOG_ERROR("%s: encoder_begin_callback returned false\n", __func__);
+                return -6;
+            }
+        }
+        if (!parakeet_stream_encode(*ctx, *state, params.n_threads,
+                                   params.abort_callback, params.abort_callback_user_data)) {
+            PARAKEET_LOG_ERROR("%s: streaming encode failed\n", __func__);
             return -6;
         }
-    }
-    if (!parakeet_encode_internal(*ctx, *state, 0, params.n_threads, params.abort_callback, params.abort_callback_user_data)) {
-        PARAKEET_LOG_ERROR("%s: failed to encode\n", __func__);
-        return -6;
+    } else {
+        if (params.audio_ctx == 0) {
+            const int total_len = parakeet_n_len_from_state(state);
+            const int model_max_ctx = parakeet_n_audio_ctx(ctx);
+            params.audio_ctx = std::min(total_len, model_max_ctx);
+            PARAKEET_LOG_DEBUG("Processing audio: total_frames=%d, chunk_size=%d\n", total_len, params.audio_ctx);
+        }
+        state->n_audio_ctx = params.audio_ctx;
+
+        if (!parakeet_ensure_encode_sched(*ctx, *state, state->n_audio_ctx)) {
+            PARAKEET_LOG_ERROR("%s: failed to allocate encoder graph for %d mel frames\n",
+                    __func__, state->n_audio_ctx);
+            return -6;
+        }
+
+        if (params.encoder_begin_callback) {
+            if (!params.encoder_begin_callback(ctx, state, params.encoder_begin_callback_user_data)) {
+                PARAKEET_LOG_ERROR("%s: encoder_begin_callback returned false - aborting\n", __func__);
+                return -6;
+            }
+        }
+        if (!parakeet_encode_internal(*ctx, *state, 0, params.n_threads,
+                                      params.abort_callback, params.abort_callback_user_data)) {
+            PARAKEET_LOG_ERROR("%s: failed to encode\n", __func__);
+            return -6;
+        }
     }
 
     const size_t tokens_before = state->decoded_tokens.size();
@@ -3709,8 +4611,8 @@ int parakeet_chunk(
 
         if (!text.empty()) {
             parakeet_segment segment;
-            segment.t0 = 0; // Caller tracks timing
-            segment.t1 = n_frames;
+            segment.t0 = 0;
+            segment.t1 = state->n_frames;
             segment.text = text;
             segment.tokens = result_tokens;
 
