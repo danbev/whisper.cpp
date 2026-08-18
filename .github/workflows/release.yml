@@ -615,13 +615,7 @@ jobs:
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: ./artifact
-
-      - name: Move artifacts
-        id: move_artifacts
-        run: |
-          mkdir -p ./artifact/release
-          mv ./artifact/*/*.zip ./artifact/release 2>/dev/null || true
-          mv ./artifact/*/*.tar.gz ./artifact/release 2>/dev/null || true
+          merge-multiple: true
 
       - name: Create and push git tag
         run: |
@@ -640,6 +634,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.determine-tag.outputs.tag_name }}
+          files: |
+            ./artifact/release/*.zip
+            ./artifact/release/*.tar.gz
 
       - name: Upload release
         id: upload_release
