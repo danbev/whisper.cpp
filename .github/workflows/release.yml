@@ -786,14 +786,14 @@ jobs:
       - name: Pack bin artifacts
         shell: pwsh
         run: |
-              Compress-Archive -Path "build/bin/${{ matrix.build }}" -DestinationPath "whisper-cublas-${{ matrix.cuda-toolkit }}-bin-arm64.zip"
+              Compress-Archive -Path "build/bin/${{ matrix.build }}" -DestinationPath "whisper-bin-win-cuda-${{ matrix.cuda-toolkit }}-arm64.zip"
 
       - name: Upload binaries
         if: ${{ needs.determine-tag.outputs.should_release == 'true' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: whisper-cublas-${{ matrix.cuda-toolkit }}-bin-arm64.zip
-          path: whisper-cublas-${{ matrix.cuda-toolkit }}-bin-arm64.zip
+          name: whisper-bin-win-cuda-${{ matrix.cuda-toolkit }}-arm64.zip
+          path: whisper-bin-win-cuda-${{ matrix.cuda-toolkit }}-arm64.zip
 
   ios-xcode-build:
     runs-on: macos-latest
