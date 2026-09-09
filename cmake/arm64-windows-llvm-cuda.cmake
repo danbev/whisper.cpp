@@ -1,6 +1,9 @@
-# Used to cross-compile ggml-cuda for Windows ARM64 on an x64 Windows host.
-set( CMAKE_SYSTEM_NAME Windows )
-set( CMAKE_SYSTEM_PROCESSOR arm64 )
+# Cross-compile whisper.cpp for Windows ARM64 on an x64 host. Includes the
+# Clang toolchain ggml requires on ARM (MSVC is explicitly rejected there -
+# see ggml/src/ggml-cpu/CMakeLists.txt) and layers CUDA support on top: nvcc
+# compiles CUDA sources using an ARM64-targeting MSVC host compiler,
+# independent of the Clang toolchain used for the rest of the project.
+include( ${CMAKE_CURRENT_LIST_DIR}/arm64-windows-llvm.cmake )
 
 if ( DEFINED CUDAToolkit_ROOT )
     file( TO_CMAKE_PATH "${CUDAToolkit_ROOT}" CUDA_ROOT )

@@ -748,7 +748,7 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" amd64_arm64
           cmake -S . -B build -G "Ninja Multi-Config" ^
-            -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-msvc-cuda.cmake ^
+            -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm-cuda.cmake ^
             -DCMAKE_BUILD_TYPE=${{ matrix.build }} ^
             -DGGML_CUDA=ON ^
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
@@ -763,6 +763,25 @@ jobs:
           Get-ChildItem "$env:CUDA_PATH\bin\arm64" -Filter "cudart64_*.dll" | Copy-Item -Destination "build/bin/${{ matrix.build }}"
           Get-ChildItem "$env:CUDA_PATH\bin\arm64" -Filter "cublas64_*.dll" | Copy-Item -Destination "build/bin/${{ matrix.build }}"
           Get-ChildItem "$env:CUDA_PATH\bin\arm64" -Filter "cublasLt64_*.dll" | Copy-Item -Destination "build/bin/${{ matrix.build }}"
+
+      - name: Copy OpenMP runtime DLL
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstallPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          if (-not $vsInstallPath) {
+            Write-Error "Could not find a Visual Studio install with the ARM64 MSVC toolset"
+            exit 1
+          }
+          $redistVersion = Get-ChildItem "$vsInstallPath\VC\Redist\MSVC" -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+            Sort-Object Name -Descending | Select-Object -First 1
+          $ompDll = "$vsInstallPath\VC\Redist\MSVC\$($redistVersion.Name)\debug_nonredist\arm64\Microsoft.VC143.OpenMP.LLVM\libomp140.aarch64.dll"
+          if (-not (Test-Path $ompDll)) {
+            Write-Error "libomp140.aarch64.dll not found at $ompDll"
+            exit 1
+          }
+          Copy-Item $ompDll "build\bin\${{ matrix.build }}\" -Force
 
       - name: Pack bin artifacts
         shell: pwsh
