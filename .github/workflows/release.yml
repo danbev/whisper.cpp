@@ -86,7 +86,7 @@ jobs:
   ubuntu-cpu:
     runs-on: ${{ matrix.os }}
     needs: determine-tag
-    if: ${{ needs.determine-tag.outputs.should_release == 'true' }}
+    if: false # TEMP: disabled for arm64-cuda CI round-trip testing, drop this commit before merging
 
     strategy:
       matrix:
@@ -139,6 +139,7 @@ jobs:
   windows:
     runs-on: windows-latest
     needs: determine-tag
+    if: false # TEMP: disabled for arm64-cuda CI round-trip testing, drop this commit before merging
 
     strategy:
       matrix:
@@ -235,6 +236,7 @@ jobs:
   windows-blas:
     runs-on: windows-latest
     needs: determine-tag
+    if: false # TEMP: disabled for arm64-cuda CI round-trip testing, drop this commit before merging
 
     strategy:
       matrix:
@@ -323,6 +325,7 @@ jobs:
   windows-cublas:
     runs-on: windows-2022
     needs: determine-tag
+    if: false # TEMP: disabled for arm64-cuda CI round-trip testing, drop this commit before merging
     strategy:
       fail-fast: false
       matrix:
@@ -533,6 +536,7 @@ jobs:
   windows-arm64-cpu:
     runs-on: windows-2022
     needs: determine-tag
+    if: false # TEMP: disabled for arm64-cuda CI round-trip testing, drop this commit before merging
 
     strategy:
       matrix:
@@ -599,6 +603,7 @@ jobs:
   windows-arm64-opencl-adreno:
     runs-on: windows-2022
     needs: determine-tag
+    if: false # TEMP: disabled for arm64-cuda CI round-trip testing, drop this commit before merging
 
     strategy:
       matrix:
@@ -774,6 +779,7 @@ jobs:
   ios-xcode-build:
     runs-on: macos-latest
     needs: determine-tag
+    if: false # TEMP: disabled for arm64-cuda CI round-trip testing, drop this commit before merging
 
     strategy:
       matrix:
@@ -834,15 +840,9 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    # TEMP: needs list trimmed to the arm64-cuda job for CI round-trip testing, restore before merging
     needs:
       - determine-tag
-      - ubuntu-cpu
-      - ios-xcode-build
-      - windows
-      - windows-blas
-      - windows-cublas
-      - windows-arm64-cpu
-      - windows-arm64-opencl-adreno
       - windows-arm64-cuda
 
     steps:
