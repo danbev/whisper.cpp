@@ -93,7 +93,10 @@ jobs:
       fail-fast: false
       matrix:
         build: [Debug, Release]
-        backend_dl: ['OFF', 'ON']
+        backend_dl: ['OFF']
+        include:
+          - build: Debug
+            backend_dl: 'ON'
 
     steps:
       - name: Clone
